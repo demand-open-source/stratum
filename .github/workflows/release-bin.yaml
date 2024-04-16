@@ -109,7 +109,7 @@ jobs:
           asset_name: translator_sv2-aarch64-apple-darwin
           tag: ${{ github.ref }}
 
-  release_demand_all_in_one:
+  release_solo_demand_all_in_one:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -122,7 +122,7 @@ jobs:
           override: true
 
       - name: Compile Native
-        run: cargo build --release --locked --manifest-path=roles/demand_all_in_one/Cargo.toml
+        run: cargo build --release --locked --manifest-path=roles/demand-solo-all-in-one/Cargo.toml
 
       - name: Install aarch64-apple-darwin target
         if: matrix.os == 'macos-latest'
@@ -130,14 +130,14 @@ jobs:
 
       - name: Compile MacOS ARM64
         if: matrix.os == 'macos-latest'
-        run: cargo build --release --locked --manifest-path=roles/demand_all_in_one/Cargo.toml --target=aarch64-apple-darwin
+        run: cargo build --release --locked --manifest-path=roles/demand-solo-all-in-one/Cargo.toml --target=aarch64-apple-darwin
 
       - name: Upload Linux x86-64 binaries to release
         if: matrix.os == 'ubuntu-20.04'
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: roles/target/release/demand_all_in_one_sv2
+          file: roles/target/release/demand-solo-all-in-one
           asset_name: demand_all_in_one_sv2-x86_64-linux-gnu
           tag: ${{ github.ref }}
 
@@ -146,7 +146,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: roles/target/release/demand_all_in_one_sv2
+          file: roles/target/release/demand-solo-all-in-one
           asset_name: demand_all_in_one_sv2-x86_64-apple-darwin
           tag: ${{ github.ref }}
 
@@ -155,7 +155,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: roles/target/aarch64-apple-darwin/release/demand_all_in_one_sv2
+          file: roles/target/aarch64-apple-darwin/release/demand-solo-all-in-one
           asset_name: demand_all_in_one_sv2-aarch64-apple-darwin
           tag: ${{ github.ref }}
 
@@ -164,6 +164,6 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: roles/target/release/demand_all_in_one_sv2
+          file: roles/target/release/demand-solo-all-in-one
           asset_name: demand_all_in_one_sv2-x86_64-windows-gnu
           tag: ${{ github.ref }}
