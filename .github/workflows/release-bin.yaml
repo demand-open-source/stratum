@@ -113,7 +113,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04, macos-latest, windows-latest ]
+        os: [ ubuntu-20.04, macos-latest ]
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
@@ -157,13 +157,4 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: roles/target/aarch64-apple-darwin/release/demand-solo-all-in-one
           asset_name: demand_all_in_one_sv2-aarch64-apple-darwin
-          tag: ${{ github.ref }}
-
-      - name: Upload Windows x86-64 binaries to release
-        if: matrix.os == 'windows-latest'
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: roles/target/release/demand-solo-all-in-one
-          asset_name: demand_all_in_one_sv2-x86_64-windows-gnu
           tag: ${{ github.ref }}
