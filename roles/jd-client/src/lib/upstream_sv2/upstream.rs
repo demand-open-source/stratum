@@ -120,6 +120,7 @@ pub struct Upstream {
     pub sender: Sender<EitherFrame>,
     pub downstream: Option<Arc<Mutex<Downstream>>>,
     task_collector: Arc<Mutex<Vec<AbortHandle>>>,
+    #[allow(dead_code)]
     pool_chaneger_trigger: Arc<Mutex<PoolChangerTrigger>>,
     channel_factory: Option<PoolChannelFactory>,
     template_to_job_id: TemplateToJobId,
@@ -169,8 +170,8 @@ impl Upstream {
             }
         };
 
-        let pub_key: Secp256k1PublicKey = authority_public_key;
-        let initiator = Initiator::from_raw_k(pub_key.into_bytes())?;
+        let _pub_key: Secp256k1PublicKey = authority_public_key;
+        //let initiator = Initiator::from_raw_k(pub_key.into_bytes())?;
         let initiator = Initiator::new(None);
 
         info!(

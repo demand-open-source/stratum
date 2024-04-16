@@ -44,11 +44,15 @@ pub struct UpstreamDifficultyConfig {
 
 impl Default for ProxyConfig {
     fn default() -> Self {
-        let downstream_address = std::env::var("LISTEN_ON").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let downstream_address =
+            std::env::var("LISTEN_ON").unwrap_or_else(|_| "0.0.0.0".to_string());
         Self {
             upstream_address: "127.0.0.1".to_string(),
             upstream_port: 34265,
-            upstream_authority_pubkey: "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string().try_into().unwrap(),
+            upstream_authority_pubkey: "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+                .to_string()
+                .try_into()
+                .unwrap(),
             downstream_address,
             downstream_port: 34255,
             max_supported_version: 2,

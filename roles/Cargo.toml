@@ -23,7 +23,7 @@ members = [
     "test-utils/sv1-mining-device",
     "translator",
     "jd-client",
-    "jd-server",
+    "jd-server", "demand-solo-all-in-one",
 ]
 
 [profile.dev]

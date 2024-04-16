@@ -330,7 +330,7 @@ impl Downstream {
         bridge: Arc<Mutex<crate::proxy::Bridge>>,
         downstream_difficulty_config: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
-    ) {
+    ) -> async_std::task::JoinHandle<()> {
         task::spawn(async move {
             let downstream_listener = TcpListener::bind(downstream_addr).await.unwrap();
             let mut downstream_incoming = downstream_listener.incoming();
@@ -366,7 +366,7 @@ impl Downstream {
                     }
                 }
             }
-        });
+        })
     }
 
     /// As SV1 messages come in, determines if the message response needs to be translated to SV2

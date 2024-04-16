@@ -1,10 +1,8 @@
 use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
 use roles_logic_sv2::{errors::Error, utils::CoinbaseOutput as CoinbaseOutput_};
 use serde::Deserialize;
-use std::time::Duration;
-use stratum_common::bitcoin::TxOut;
-use stratum_common::bitcoin::Address;
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
+use stratum_common::bitcoin::{Address, TxOut};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CoinbaseOutput {
@@ -48,9 +46,10 @@ pub struct ProxyConfig {
 
 impl Default for ProxyConfig {
     fn default() -> Self {
-        let downstream_address = std::env::var("LISTEN_ON").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let downstream_address =
+            std::env::var("LISTEN_ON").unwrap_or_else(|_| "127.0.0.1".to_string());
         let address = std::env::var("ADDRESS").unwrap_or("".to_string());
-        let mut pool_signature = "DEMANDsv2".to_string();
+        let pool_signature = "DEMANDsv2".to_string();
         let pool_signature = pool_signature + &address;
         Self {
             downstream_address,
@@ -59,20 +58,27 @@ impl Default for ProxyConfig {
             min_supported_version: 2,
             min_extranonce2_size: 8,
             withhold: false,
-            authority_public_key: "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72".to_string().try_into().unwrap(),
-            authority_secret_key: "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n".to_string().try_into().unwrap(),
+            authority_public_key: "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+                .to_string()
+                .try_into()
+                .unwrap(),
+            authority_secret_key: "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
+                .to_string()
+                .try_into()
+                .unwrap(),
             cert_validity_sec: 3600,
             tp_address: "127.0.0.1:8442".to_string(),
             tp_authority_public_key: None,
             retry: 10,
-            upstreams: vec![
-                Upstream {
-                    authority_pubkey: "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ".to_string().try_into().unwrap(), 
-                    pool_address: "mining.dmnd.work:2000".to_string(), 
-                    jd_address: "mining.dmnd.work:2000".to_string(), 
-                    pool_signature,
-                },
-            ],
+            upstreams: vec![Upstream {
+                authority_pubkey: "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ"
+                    .to_string()
+                    .try_into()
+                    .unwrap(),
+                pool_address: "mining.dmnd.work:2000".to_string(),
+                jd_address: "mining.dmnd.work:2000".to_string(),
+                pool_signature,
+            }],
             timeout: Duration::from_secs(1),
             test_only_do_not_send_solution_to_tp: None,
         }
@@ -117,7 +123,8 @@ where
 }
 
 pub fn get_coinbase_output(address: &str) -> Result<Vec<TxOut>, Error> {
-    let address = Address::from_str(address).unwrap_or_else(|_| panic!("Invalid address: {}", address));
+    let address =
+        Address::from_str(address).unwrap_or_else(|_| panic!("Invalid address: {}", address));
     let script = address.script_pubkey();
     Ok(vec![TxOut {
         value: 0,

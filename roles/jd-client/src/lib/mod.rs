@@ -33,6 +33,7 @@ pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug)]
 pub struct PoolChangerTrigger {
+    #[allow(unused)]
     timeout: Duration,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -45,6 +46,7 @@ impl PoolChangerTrigger {
         }
     }
 
+    #[allow(dead_code)]
     pub fn start(&mut self, sender: status::Sender) {
         let timeout = self.timeout;
         let task = tokio::task::spawn(async move {

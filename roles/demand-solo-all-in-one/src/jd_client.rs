@@ -1,9 +1,6 @@
 #![allow(special_module_name)]
 
-mod args;
-mod lib;
-
-use lib::{
+use jd_client::{
     error::{Error, ProxyResult},
     job_declarator::JobDeclarator,
     proxy_config::ProxyConfig,
@@ -12,7 +9,7 @@ use lib::{
     PoolChangerTrigger,
 };
 
-use args::Args;
+use crate::args::Args;
 use async_channel::{bounded, unbounded};
 use futures::{select, FutureExt};
 use roles_logic_sv2::utils::Mutex;
@@ -94,53 +91,48 @@ fn process_cli_args<'a>() -> ProxyResult<'a, ProxyConfig> {
 /// whenever we want to commit a mining job we can do that without waiting for upstream to provide
 /// a new token.
 ///
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
-    dotenv::dotenv().ok();
-    if std::env::var("ADDRESS").is_err() {
-        error!("ADDRESS env variable not set");
-        std::process::exit(1);
-    }
-
-    let mut upstream_index = 0;
-    let mut interrupt_signal_future = Box::pin(tokio::signal::ctrl_c().fuse());
-
-    // Channel used to manage failed tasks
-    let (tx_status, rx_status) = unbounded();
-
-    let task_collector = Arc::new(Mutex::new(vec![]));
-
-    let proxy_config = match process_cli_args() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("No valid config file using default config");
-            debug!("Error: {}", e);
-            ProxyConfig::default()
+pub async fn main_jd(ready_tx: tokio::sync::oneshot::Sender<()>) {
+    let _ = tokio::task::spawn(async {
+        if std::env::var("ADDRESS").is_err() {
+            error!("ADDRESS env variable not set");
+            std::process::exit(1);
         }
-    };
 
-    loop {
-        {
-            let task_collector = task_collector.clone();
-            let tx_status = tx_status.clone();
+        let mut interrupt_signal_future = Box::pin(tokio::signal::ctrl_c().fuse());
 
-            if let Some(upstream) = proxy_config.upstreams.get(upstream_index) {
-                let initialize = initialize_jd(
-                    tx_status.clone(),
-                    task_collector,
-                    upstream.clone(),
-                    proxy_config.timeout,
-                );
-                tokio::task::spawn(initialize);
-            } else {
-                let initialize = initialize_jd_as_solo_miner(
-                    tx_status.clone(),
-                    task_collector,
-                    proxy_config.timeout,
-                );
-                tokio::task::spawn(initialize);
+        // Channel used to manage failed tasks
+        let (tx_status, rx_status) = unbounded();
+
+        let task_collector = Arc::new(Mutex::new(vec![]));
+
+        let proxy_config = match process_cli_args() {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("No valid config file using default config");
+                debug!("Error: {}", e);
+                ProxyConfig::default()
             }
+        };
+
+        let task_collector = task_collector.clone();
+        let tx_status = tx_status.clone();
+
+        if let Some(upstream) = proxy_config.upstreams.first() {
+            let initialize = initialize_jd(
+                tx_status.clone(),
+                task_collector.clone(),
+                upstream.clone(),
+                proxy_config.timeout,
+                ready_tx,
+            );
+            tokio::task::spawn(initialize);
+        } else {
+            let initialize = initialize_jd_as_solo_miner(
+                tx_status.clone(),
+                task_collector.clone(),
+                proxy_config.timeout,
+            );
+            tokio::task::spawn(initialize);
         }
         // Check all tasks if is_finished() is true, if so exit
         loop {
@@ -199,7 +191,7 @@ async fn main() {
                             }
                         })
                         .unwrap();
-                    upstream_index += 1;
+                    //upstream_index += 1;
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     break;
                 }
@@ -208,7 +200,8 @@ async fn main() {
                 }
             }
         }
-    }
+    })
+    .await;
 }
 async fn initialize_jd_as_solo_miner(
     tx_status: async_channel::Sender<status::Status<'static>>,
@@ -217,7 +210,8 @@ async fn initialize_jd_as_solo_miner(
 ) {
     let proxy_config = process_cli_args().unwrap();
     let miner_tx_out =
-        lib::proxy_config::get_coinbase_output(std::env::var("ADDRESS").unwrap().as_str()).unwrap();
+        jd_client::proxy_config::get_coinbase_output(std::env::var("ADDRESS").unwrap().as_str())
+            .unwrap();
 
     // When Downstream receive a share that meets bitcoin target it transformit in a
     // SubmitSolution and send it to the TemplateReceiver
@@ -230,7 +224,7 @@ async fn initialize_jd_as_solo_miner(
     );
 
     // Wait for downstream to connect
-    let downstream = lib::downstream::listen_for_downstream_mining(
+    let downstream = jd_client::downstream::listen_for_downstream_mining(
         downstream_addr,
         None,
         send_solution,
@@ -269,8 +263,9 @@ async fn initialize_jd_as_solo_miner(
 async fn initialize_jd(
     tx_status: async_channel::Sender<status::Status<'static>>,
     task_collector: Arc<Mutex<Vec<AbortHandle>>>,
-    upstream_config: lib::proxy_config::Upstream,
+    upstream_config: jd_client::proxy_config::Upstream,
     timeout: Duration,
+    ready_tx: tokio::sync::oneshot::Sender<()>,
 ) {
     let proxy_config = match process_cli_args() {
         Ok(p) => p,
@@ -296,7 +291,7 @@ async fn initialize_jd(
     let (send_solution, recv_solution) = bounded(10);
 
     // Instantiate a new `Upstream` (SV2 Pool)
-    let upstream = match lib::upstream_sv2::Upstream::new(
+    let upstream = match jd_client::upstream_sv2::Upstream::new(
         upstream_addr,
         upstream_config.authority_pubkey,
         0, // TODO
@@ -315,12 +310,12 @@ async fn initialize_jd(
     };
 
     // Start receiving messages from the SV2 Upstream role
-    if let Err(e) = lib::upstream_sv2::Upstream::parse_incoming(upstream.clone()) {
+    if let Err(e) = jd_client::upstream_sv2::Upstream::parse_incoming(upstream.clone()) {
         error!("failed to create sv2 parser: {}", e);
         panic!()
     }
 
-    match lib::upstream_sv2::Upstream::setup_connection(
+    match jd_client::upstream_sv2::Upstream::setup_connection(
         upstream.clone(),
         proxy_config.min_supported_version,
         proxy_config.max_supported_version,
@@ -370,9 +365,10 @@ async fn initialize_jd(
             return;
         }
     };
+    let _ = ready_tx.send(());
 
     // Wait for downstream to connect
-    let downstream = lib::downstream::listen_for_downstream_mining(
+    let downstream = jd_client::downstream::listen_for_downstream_mining(
         downstream_addr,
         Some(upstream),
         send_solution,

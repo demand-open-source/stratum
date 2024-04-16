@@ -1,12 +1,8 @@
-#![allow(special_module_name)]
-mod args;
-mod lib;
-
-use args::Args;
+use crate::args::Args;
 use error::{Error, ProxyResult};
-use lib::{downstream_sv1, error, proxy, proxy_config, status, upstream_sv2};
 use proxy_config::ProxyConfig;
 use roles_logic_sv2::utils::Mutex;
+use translator_sv2::{downstream_sv1, error, proxy, proxy_config, status, upstream_sv2};
 
 use async_channel::{bounded, unbounded};
 use futures::{select, FutureExt};
@@ -19,8 +15,8 @@ use std::{
 use tokio::{sync::broadcast, task};
 use v1::server_to_client;
 
-use crate::status::{State, Status};
 use tracing::{debug, error, info, warn};
+use translator_sv2::status::State;
 /// Process CLI args, if any.
 #[allow(clippy::result_large_err)]
 fn process_cli_args<'a>() -> ProxyResult<'a, ProxyConfig> {
@@ -34,11 +30,11 @@ fn process_cli_args<'a>() -> ProxyResult<'a, ProxyConfig> {
     let config_file = std::fs::read_to_string(args.config_path)?;
     Ok(toml::from_str::<ProxyConfig>(&config_file)?)
 }
-
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
-
+pub async fn main_translator(
+    ready_rx: tokio::sync::oneshot::Receiver<()>,
+    free_socket_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    let _ = ready_rx.await;
     let proxy_config = match process_cli_args() {
         Ok(p) => p,
         Err(e) => {
@@ -153,7 +149,7 @@ async fn main() {
             if target != [0; 32] {
                 break;
             };
-            async_std::task::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
         // Instantiate a new `Bridge` and begins handling incoming messages
@@ -177,7 +173,7 @@ async fn main() {
         );
 
         // Accept connections from one or more SV1 Downstream roles (SV1 Mining Devices)
-        downstream_sv1::Downstream::accept_connections(
+        let jn = downstream_sv1::Downstream::accept_connections(
             downstream_addr,
             tx_sv1_bridge,
             tx_sv1_notify,
@@ -186,6 +182,10 @@ async fn main() {
             proxy_config.downstream_difficulty_config,
             diff_config,
         );
+        tokio::task::spawn(async {
+            let _ = free_socket_rx.await;
+            jn.cancel().await;
+        });
     }); // End of init task
 
     debug!("Starting up signal listener");
@@ -209,7 +209,7 @@ async fn main() {
                 break;
             }
         };
-        let task_status: Status = task_status.unwrap();
+        let task_status = task_status.unwrap();
 
         match task_status.state {
             // Should only be sent by the downstream listener
