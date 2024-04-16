@@ -1,4 +1,5 @@
 use super::super::downstream::DownstreamMiningNode as Downstream;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::super::{
     error::{
@@ -36,6 +37,14 @@ use tokio::{net::TcpStream, task, task::AbortHandle};
 use tracing::{error, info, warn};
 
 use std::collections::VecDeque;
+
+fn get_device_id() -> u128 {
+    let start = SystemTime::now();
+    let now = start
+        .duration_since(UNIX_EPOCH)
+        .unwrap();
+    now.as_nanos()
+}
 
 #[derive(Debug)]
 struct CircularBuffer {
@@ -416,7 +425,8 @@ impl Upstream {
             true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
         };
         let address = std::env::var("ADDRESS").unwrap();
-        let device_id = format!("device_id::SOLO::{}", address)
+        let device_id = get_device_id();
+        let device_id = format!("{}::SOLO::{}",device_id, address)
             .to_string()
             .try_into()?;
         Ok(SetupConnection {

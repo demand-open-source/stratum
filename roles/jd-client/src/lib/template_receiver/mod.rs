@@ -67,24 +67,24 @@ impl TemplateRx {
             None => Initiator::without_pk(),
         }
         .unwrap_or_else(|_| {
-                        error!("Impossible to connect to TP wait few second and retry");
-                        std::process::abort();
+            error!("Impossible to connect to TP wait few second and retry");
+            std::process::abort();
         });
         let (mut receiver, mut sender, _, _) =
             Connection::new(stream, HandshakeRole::Initiator(initiator))
                 .await
-        .unwrap_or_else(|_| {
-                        error!("Impossible to connect to TP wait few second and retry");
-                        std::process::abort();
-        });
+                .unwrap_or_else(|_| {
+                    error!("Impossible to connect to TP wait few second and retry");
+                    std::process::abort();
+                });
 
         info!("Template Receiver try to set up connection");
         SetupConnectionHandler::setup(&mut receiver, &mut sender, address)
             .await
-        .unwrap_or_else(|_| {
-                        error!("Impossible to connect to TP wait few second and retry");
-                        std::process::abort();
-        });
+            .unwrap_or_else(|_| {
+                error!("Impossible to connect to TP wait few second and retry");
+                std::process::abort();
+            });
         info!("Template Receiver connection set up");
 
         let self_mutex = Arc::new(Mutex::new(Self {

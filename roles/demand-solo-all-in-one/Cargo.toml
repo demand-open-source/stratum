@@ -34,3 +34,5 @@ hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 hyper-tls = "*"
 ctrlc = "3.4"
+clap = { version = "^4.5.4", features = ["derive"] }
+rand = "0.8.5"

@@ -46,6 +46,8 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         let downstream_address =
             std::env::var("LISTEN_ON").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let downstream_port =
+            std::env::var("DOWNSTREAM_PORT").unwrap_or_else(|_| 34255.to_string());
         Self {
             upstream_address: "127.0.0.1".to_string(),
             upstream_port: 34265,
@@ -54,7 +56,9 @@ impl Default for ProxyConfig {
                 .try_into()
                 .unwrap(),
             downstream_address,
-            downstream_port: 34255,
+            downstream_port: downstream_port
+                .parse::<u16>()
+                .expect("Downstream port must be a valid port number"),
             max_supported_version: 2,
             min_supported_version: 2,
             min_extranonce2_size: 8,
