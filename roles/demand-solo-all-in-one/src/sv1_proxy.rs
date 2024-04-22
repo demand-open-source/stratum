@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use rand::Rng;
 use roles_logic_sv2::utils::Mutex;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -39,19 +38,16 @@ impl Upstream {
         Self::DemandSolo("mining.dmnd.work:1000".to_string())
     }
 
-    pub fn authorize(&self, id: u64, bitcoin_address: &str) -> String {
+    pub fn authorize(&self, id: u64, bitcoin_address: &str, user: &str) -> String {
         let mut message = match self {
             Upstream::CkPool(_) => format!(
                 r#"{{"id": {}, "method": "mining.authorize", "params": ["{}", "x"]}}"#,
                 id, bitcoin_address
             ),
             Upstream::DemandSolo(_) => {
-                let mut rng = rand::thread_rng();
-                let d_id: u64 = rng.gen();
-
                 format!(
                     r#"{{"id": {}, "method": "mining.authorize", "params": ["{}", "{}"]}}"#,
-                    id, d_id, bitcoin_address
+                    id, user, bitcoin_address
                 )
             }
         };
@@ -63,7 +59,7 @@ impl Upstream {
 pub async fn listen_downstream(upstream: Upstream, port: u16, kill: Option<Receiver<()>>) {
     let bitcoin_address = std::env::var("ADDRESS")
         .expect("Env var ADDRESS must be set with the solo pool coinbase address");
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
     let socket = TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .expect("Impossible to bind sv1 proxy");
@@ -141,7 +137,7 @@ async fn start_proxy(dw: TcpStream, address: String, bitcoin_address: String, up
                     serde_json::from_str::<Message>(&received).map(TryInto::<Method>::try_into)
                 {
                     if let Method::Client2Server(Client2Server::Authorize(a)) = parsed {
-                        received = upstream.authorize(a.id, &bitcoin_address);
+                        received = upstream.authorize(a.id, &bitcoin_address, &a.name);
                     }
                     let to_send = received.clone().into_bytes();
                     info!("< {} {}", &address, received);
