@@ -64,7 +64,7 @@ impl Default for ProxyConfig {
             min_extranonce2_size: 8,
             downstream_difficulty_config: DownstreamDifficultyConfig {
                 min_individual_miner_hashrate: 10_000_000_000_000.0,
-                shares_per_minute: 6.0,
+                shares_per_minute: 10.0,
                 submits_since_last_update: u32::default(),
                 timestamp_of_last_update: u64::default(),
             },

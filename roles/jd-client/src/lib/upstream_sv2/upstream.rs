@@ -35,16 +35,9 @@ use roles_logic_sv2::{
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread::sleep, time::Duration};
 use tokio::{net::TcpStream, task, task::AbortHandle};
 use tracing::{error, info, warn};
+use rand::distributions::{Alphanumeric, DistString};
 
 use std::collections::VecDeque;
-
-fn get_device_id() -> u128 {
-    let start = SystemTime::now();
-    let now = start
-        .duration_since(UNIX_EPOCH)
-        .unwrap();
-    now.as_nanos()
-}
 
 #[derive(Debug)]
 struct CircularBuffer {
@@ -425,7 +418,7 @@ impl Upstream {
             true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
         };
         let address = std::env::var("ADDRESS").unwrap();
-        let device_id = get_device_id();
+        let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
         let device_id = format!("{}::SOLO::{}",device_id, address)
             .to_string()
             .try_into()?;

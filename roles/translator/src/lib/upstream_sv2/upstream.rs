@@ -40,6 +40,7 @@ use std::{
     time::Duration,
 };
 use tracing::{error, info, warn};
+use rand::distributions::{Alphanumeric, DistString};
 
 use stratum_common::bitcoin::BlockHash;
 
@@ -526,11 +527,16 @@ impl Upstream {
         let vendor = String::new().try_into()?;
         let hardware_version = String::new().try_into()?;
         let firmware = String::new().try_into()?;
-        let device_id = String::new().try_into()?;
         let flags = match is_work_selection_enabled {
             false => 0b0000_0000_0000_0000_0000_0000_0000_0100,
             true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
         };
+        let address = std::env::var("ADDRESS").expect("A env variable containing a valid bitcoin address called ADDRESS must be set");
+        let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+        let device_id = format!("{}::SOLO::{}",device_id, address)
+            .to_string()
+            .try_into()
+            .unwrap();
         Ok(SetupConnection {
             protocol: Protocol::MiningProtocol,
             min_version,

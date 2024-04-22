@@ -1316,6 +1316,7 @@ dependencies = [
  "key-utils",
  "network_helpers_sv2",
  "nohash-hasher",
+ "rand",
  "roles_logic_sv2",
  "serde",
  "stratum-common",

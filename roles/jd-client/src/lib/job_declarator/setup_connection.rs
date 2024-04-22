@@ -8,6 +8,7 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 use std::{convert::TryInto, net::SocketAddr, sync::Arc};
+use rand::distributions::{Alphanumeric, DistString};
 pub type Message = PoolMessages<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
@@ -25,7 +26,8 @@ impl SetupConnectionHandler {
         let hardware_version = String::new().try_into().unwrap();
         let firmware = String::new().try_into().unwrap();
         let address = std::env::var("ADDRESS").unwrap();
-        let device_id = format!("device_id::SOLO::{}", address)
+        let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+        let device_id = format!("{}::SOLO::{}",device_id, address)
             .to_string()
             .try_into()
             .unwrap();
