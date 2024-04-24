@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::utils::Mutex;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -56,10 +57,15 @@ impl Upstream {
     }
 }
 
-pub async fn listen_downstream(upstream: Upstream, port: u16, kill: Option<Receiver<()>>) {
+pub async fn listen_downstream(
+    upstream: Upstream,
+    port: u16,
+    kill: Option<Receiver<()>>,
+    timeout: u64,
+) {
     let bitcoin_address = std::env::var("ADDRESS")
         .expect("Env var ADDRESS must be set with the solo pool coinbase address");
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(timeout)).await;
     let socket = TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .expect("Impossible to bind sv1 proxy");
@@ -131,19 +137,43 @@ async fn start_proxy(dw: TcpStream, address: String, bitcoin_address: String, up
             let mut reader = BufReader::new(dw_read);
             let mut received = String::new();
             let address = address.clone();
+            let user_name = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
 
             while reader.read_line(&mut received).await.is_ok() {
                 if let Ok(Ok(parsed)) =
                     serde_json::from_str::<Message>(&received).map(TryInto::<Method>::try_into)
                 {
-                    if let Method::Client2Server(Client2Server::Authorize(a)) = parsed {
-                        received = upstream.authorize(a.id, &bitcoin_address, &a.name);
+                    if let Method::Client2Server(Client2Server::Authorize(ref a)) = parsed {
+                        received = upstream.authorize(a.id, &bitcoin_address, &user_name);
+                    }
+                    if let Method::Client2Server(Client2Server::Submit(mut s)) = parsed {
+                        s.user_name = match upstream {
+                            Upstream::CkPool(_) => bitcoin_address.clone(),
+                            Upstream::DemandSolo(_) => user_name.clone(),
+                        };
+                        let message: v1::json_rpc::Message = s.into();
+                        received = match serde_json::to_string(&message) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!("Error serializing sumbit message {:?}", e);
+                                received
+                            }
+                        };
+                        received.push('\n');
                     }
                     let to_send = received.clone().into_bytes();
                     info!("< {} {}", &address, received);
                     if let Err(e) = up_send.write(to_send.as_ref()).await {
-                        error!("Ck pool dropped {:?}", e);
-                        std::process::abort();
+                        match upstream {
+                            Upstream::CkPool(_) => {
+                                error!("CkPool dropped {:?}", e);
+                                break;
+                            }
+                            Upstream::DemandSolo(_) => {
+                                error!("Demand sv1 dropped {:?}", e);
+                                break;
+                            }
+                        }
                     }
                     received.clear();
                 } else {
