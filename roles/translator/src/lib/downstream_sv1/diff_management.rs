@@ -97,6 +97,7 @@ impl Downstream {
         if let Some(new_hash_rate) =
             Self::update_miner_hashrate(self_.clone(), prev_target.clone())?
         {
+            self_.safe_lock(|s| s.hashrate_updated = true).unwrap();
             let new_target = match roles_logic_sv2::utils::hash_rate_to_target(
                 new_hash_rate.into(),
                 diff_mgmt.shares_per_minute.into(),

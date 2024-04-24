@@ -16,6 +16,7 @@ use codec_sv2::{Frame, HandshakeRole, Initiator};
 use error_handling::handle_result;
 use key_utils::Secp256k1PublicKey;
 use network_helpers_sv2::noise_connection_tokio::Connection;
+use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
     channel_logic::channel_factory::PoolChannelFactory,
     common_messages_sv2::{Protocol, SetupConnection},
@@ -35,7 +36,6 @@ use roles_logic_sv2::{
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread::sleep, time::Duration};
 use tokio::{net::TcpStream, task, task::AbortHandle};
 use tracing::{error, info, warn};
-use rand::distributions::{Alphanumeric, DistString};
 
 use std::collections::VecDeque;
 
@@ -419,7 +419,7 @@ impl Upstream {
         };
         let address = std::env::var("ADDRESS").unwrap();
         let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
-        let device_id = format!("{}::SOLO::{}",device_id, address)
+        let device_id = format!("{}::SOLO::{}", device_id, address)
             .to_string()
             .try_into()?;
         Ok(SetupConnection {

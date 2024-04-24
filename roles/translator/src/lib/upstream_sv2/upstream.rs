@@ -15,6 +15,7 @@ use codec_sv2::{Frame, HandshakeRole, Initiator};
 use error_handling::handle_result;
 use key_utils::Secp256k1PublicKey;
 use network_helpers_sv2::Connection;
+use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
     common_messages_sv2::{Protocol, SetupConnection},
     common_properties::{IsMiningUpstream, IsUpstream},
@@ -40,7 +41,6 @@ use std::{
     time::Duration,
 };
 use tracing::{error, info, warn};
-use rand::distributions::{Alphanumeric, DistString};
 
 use stratum_common::bitcoin::BlockHash;
 
@@ -243,6 +243,7 @@ impl Upstream {
         // reset channel hashrate so downstreams can manage from now on out
         self_
             .safe_lock(|u| {
+                dbg!(&u.difficulty_config);
                 u.difficulty_config
                     .safe_lock(|d| d.channel_nominal_hashrate = 0.0)
                     .map_err(|_e| PoisonLock)
@@ -531,9 +532,10 @@ impl Upstream {
             false => 0b0000_0000_0000_0000_0000_0000_0000_0100,
             true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
         };
-        let address = std::env::var("ADDRESS").expect("A env variable containing a valid bitcoin address called ADDRESS must be set");
+        let address = std::env::var("ADDRESS")
+            .expect("A env variable containing a valid bitcoin address called ADDRESS must be set");
         let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
-        let device_id = format!("{}::SOLO::{}",device_id, address)
+        let device_id = format!("{}::SOLO::{}", device_id, address)
             .to_string()
             .try_into()
             .unwrap();

@@ -62,6 +62,7 @@ pub struct Downstream {
     extranonce2_len: usize,
     pub(super) difficulty_mgmt: DownstreamDifficultyConfig,
     pub(super) upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+    pub hashrate_updated: bool,
 }
 
 impl Downstream {
@@ -91,6 +92,7 @@ impl Downstream {
             extranonce2_len,
             difficulty_mgmt,
             upstream_difficulty_config,
+            hashrate_updated: false,
         }
     }
     /// Instantiate a new `Downstream`.
@@ -131,6 +133,7 @@ impl Downstream {
             extranonce2_len,
             difficulty_mgmt: difficulty_config,
             upstream_difficulty_config,
+            hashrate_updated: false,
         }));
         let self_ = downstream.clone();
 
@@ -311,7 +314,9 @@ impl Downstream {
                     task::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
-            let _ = Self::remove_miner_hashrate_from_channel(self_);
+            if self_.safe_lock(|d| d.hashrate_updated).unwrap() {
+                let _ = Self::remove_miner_hashrate_from_channel(self_);
+            };
             kill(&tx_shutdown).await;
             warn!(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",

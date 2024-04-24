@@ -1,5 +1,6 @@
 use async_channel::{Receiver, Sender};
 use codec_sv2::{Frame, StandardEitherFrame, StandardSv2Frame};
+use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
     common_messages_sv2::{Protocol, SetupConnection},
     handlers::common::{ParseUpstreamCommonMessages, SendTo},
@@ -8,7 +9,6 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 use std::{convert::TryInto, net::SocketAddr, sync::Arc};
-use rand::distributions::{Alphanumeric, DistString};
 pub type Message = PoolMessages<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
@@ -27,7 +27,7 @@ impl SetupConnectionHandler {
         let firmware = String::new().try_into().unwrap();
         let address = std::env::var("ADDRESS").unwrap();
         let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
-        let device_id = format!("{}::SOLO::{}",device_id, address)
+        let device_id = format!("{}::SOLO::{}", device_id, address)
             .to_string()
             .try_into()
             .unwrap();
