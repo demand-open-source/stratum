@@ -243,7 +243,6 @@ impl Upstream {
         // reset channel hashrate so downstreams can manage from now on out
         self_
             .safe_lock(|u| {
-                dbg!(&u.difficulty_config);
                 u.difficulty_config
                     .safe_lock(|d| d.channel_nominal_hashrate = 0.0)
                     .map_err(|_e| PoisonLock)
