@@ -185,6 +185,7 @@ async fn main() {
             b,
             proxy_config.downstream_difficulty_config,
             diff_config,
+            None,
         );
     }); // End of init task
 

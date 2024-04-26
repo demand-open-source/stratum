@@ -74,6 +74,7 @@ pub enum Error<'a> {
     Sv2ProtocolError(Mining<'a>),
     #[allow(clippy::enum_variant_names)]
     TargetError(roles_logic_sv2::errors::Error),
+    #[allow(dead_code)]
     Sv1MessageTooLong,
 }
 

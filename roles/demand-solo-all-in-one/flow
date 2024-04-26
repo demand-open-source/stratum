@@ -1,0 +1,72 @@
+# TP
+
+on_new_template:
+ * fetch txs data from template, it will answear with req tx data success
+ * self.new_template_message = new_template
+
+on_set_new_p_hash:
+ * JobDeclarator::on_set_new_prev_hash(..)
+
+on_req_tx_data_succ:
+ * get new_template from self.new_template_message
+ * call JobDeclarator::on_new_template(..) with new_tamplate
+
+# JDC
+
+on_new_template:
+ * self.last_declare_job_sent = Some(declare_job)
+ * send declare mining job to jds 
+
+on_set_new_p_hash:
+ * itereate over self.future_jobs.remove(id), until it get the associated job and template
+
+on receiving declare mining job success from upstream:
+  if future:
+    insert lastb declared job into self.future_jobs
+
+
+
+Something sketchy is happening here. We have several possibility:
+
+######case 1:######
+------template1------------
+new_template1 TP -> JDC
+snp1 TP -> JDC
+req_tx_data1 JDC -> TP
+tx_data1 TP -> JDC
+declare1 JDC -> JDS
+miss_data1 JDS -> JDC
+------template2------------
+new_template2 TP -> JDC
+snp2 TP -> JDC
+req_tx_data2 JDC -> TP
+tx_data2 TP -> JDC
+declare2 JDC -> JDS
+miss_data2 JDS -> JDC
+prov_miss_tx1 JDC -> JDS
+prov_miss_tx2 JDC -> JDS
+declate_success_2 -> JDS -> JDC
+here snp2 can get the declared2 job and exit from the loop, snp1 will never exit but we could put a
+timeout.
+
+######case 2:######
+------template1------------
+
+new_template1 TP -> JDC
+req_tx_data1 JDC -> TP
+new_template2 TP -> JDC
+req_tx_data2 JDC -> TP
+tx_data1 TP -> JDC
+snp1 TP -> JDC
+tx_data2 TP -> JDC
+
+
+req_tx_data2 JDC -> TP
+
+------template2------------
+snp2 TP -> JDC
+tx_data2 TP -> JDC
+declare2 JDC -> JDS
+
+
+In case 1 we spawn a task to will keep 

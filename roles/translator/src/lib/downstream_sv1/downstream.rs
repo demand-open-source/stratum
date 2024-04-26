@@ -5,15 +5,14 @@ use crate::{
     status,
 };
 use async_channel::{bounded, Receiver, Sender};
-use async_std::{
-    io::BufReader,
-    net::{TcpListener, TcpStream},
-    prelude::*,
-    task,
-};
 use error_handling::handle_result;
 use futures::FutureExt;
-use tokio::sync::broadcast;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::broadcast,
+    task,
+};
 
 use super::{kill, DownstreamMessages, SubmitShareWithChannelId, SUBSCRIBE_TIMEOUT_SECS};
 
@@ -22,9 +21,7 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 
-use crate::error::Error;
-use futures::select;
-use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio::select;
 
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{debug, info, warn};
@@ -34,8 +31,6 @@ use v1::{
     utils::{Extranonce, HexU32Be},
     IsServer,
 };
-
-const MAX_LINE_LENGTH: usize = 2_usize.pow(16);
 
 /// Handles the sending and receiving of messages to and from an SV2 Upstream role (most typically
 /// a SV2 Pool server).
@@ -109,16 +104,12 @@ impl Downstream {
         host: String,
         difficulty_config: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        to_kill: Option<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
     ) {
-        let stream = std::sync::Arc::new(stream);
-
-        // Reads and writes from Downstream SV1 Mining Device Client
-        let (socket_reader, socket_writer) = (stream.clone(), stream);
         let (tx_outgoing, receiver_outgoing) = bounded(10);
 
-        let socket_writer_clone = socket_writer.clone();
-        // Used to send SV1 `mining.notify` messages to the Downstreams
-        let _socket_writer_notify = socket_writer;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
 
         let downstream = Arc::new(Mutex::new(Downstream {
             connection_id,
@@ -153,25 +144,41 @@ impl Downstream {
         // SV1 message received, a message response is sent directly back to the SV1 Downstream
         // role, or the message is sent upwards to the Bridge for translation into a SV2 message
         // and then sent to the SV2 Upstream role.
-        let _socket_reader_task = task::spawn(async move {
-            let reader = BufReader::new(&*socket_reader);
-            let mut messages = FramedRead::new(
-                async_compat::Compat::new(reader),
-                LinesCodec::new_with_max_length(MAX_LINE_LENGTH),
-            );
+        let socket_reader_task = task::spawn(async move {
+            let mut buffer = String::new();
             loop {
                 // Read message from SV1 Mining Device Client socket
                 // On message receive, parse to `json_rpc:Message` and send to Upstream
                 // `Translator.receive_downstream` via `sender_upstream` done in
                 // `send_message_upstream`.
                 select! {
-                    res = messages.next().fuse() => {
+                    // We don't check for message lenght since the proxy is supposed to be runed
+                    // in "safe" enviorment
+                    res = reader.read_line(&mut buffer) => {
                         match res {
-                            Some(Ok(incoming)) => {
-                                debug!("Receiving from Mining Device {}: {:?}", &host_, &incoming);
-                                let incoming: json_rpc::Message = handle_result!(tx_status_reader, serde_json::from_str(&incoming));
-                                // Handle what to do with message
-                                // if let json_rpc::Message
+                            Ok(0) => {
+                                tracing::error!("Downstream: connection closed by client");
+                                handle_result!(tx_status_reader, Err(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionAborted,
+                                        "Connection closed by client"
+                                    )
+                                ));
+                                break;
+                            },
+                            Err(e) => {
+                                tracing::error!("Downstream: error reading from downtream: {}", e);
+                                handle_result!(tx_status_reader, Err(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionAborted,
+                                        "error reading from downtream"
+                                    )
+                                ));
+                                break;
+                            }
+                            Ok(_) => {
+                                debug!("Receiving from Mining Device {}: {:?}", &host_, &buffer);
+                                let incoming: json_rpc::Message = handle_result!(tx_status_reader, serde_json::from_str(&buffer));
 
                                 // if message is Submit Shares update difficulty management
                                 if let v1::Message::StandardRequest(standard_req) = incoming.clone() {
@@ -182,17 +189,7 @@ impl Downstream {
 
                                 let res = Self::handle_incoming_sv1(self_.clone(), incoming).await;
                                 handle_result!(tx_status_reader, res);
-                            }
-                            Some(Err(_)) => {
-                                handle_result!(tx_status_reader, Err(Error::Sv1MessageTooLong));
-                            }
-                            None => {
-                                handle_result!(tx_status_reader, Err(
-                                    std::io::Error::new(
-                                        std::io::ErrorKind::ConnectionAborted,
-                                        "Connection closed by client"
-                                    )
-                                ));
+                                buffer.clear();
                             }
                         }
                     },
@@ -204,6 +201,11 @@ impl Downstream {
             kill(&tx_shutdown_clone).await;
             warn!("Downstream: Shutting down sv1 downstream reader");
         });
+        if let Some(to_kill) = to_kill.as_ref() {
+            to_kill
+                .safe_lock(|tks| tks.push(socket_reader_task))
+                .unwrap();
+        }
 
         let rx_shutdown_clone = rx_shutdown.clone();
         let tx_shutdown_clone = tx_shutdown.clone();
@@ -212,7 +214,7 @@ impl Downstream {
 
         // Task to receive SV1 message responses to SV1 messages that do NOT need translation.
         // These response messages are sent directly to the SV1 Downstream role.
-        let _socket_writer_task = task::spawn(async move {
+        let socket_writer_task = task::spawn(async move {
             loop {
                 select! {
                     res = receiver_outgoing.recv().fuse() => {
@@ -225,8 +227,8 @@ impl Downstream {
                             }
                         };
                         debug!("Sending to Mining Device: {} - {:?}", &host_, &to_send);
-                        let res = (&*socket_writer_clone)
-                                    .write_all(to_send.as_bytes())
+                        let res = writer
+                                    .write_all_buf(&mut to_send.as_bytes())
                                     .await;
                         handle_result!(tx_status_writer, res);
                     },
@@ -241,11 +243,16 @@ impl Downstream {
                 &host_
             );
         });
+        if let Some(to_kill) = to_kill.as_ref() {
+            to_kill
+                .safe_lock(|tks| tks.push(socket_writer_task))
+                .unwrap();
+        }
 
         let tx_status_notify = tx_status;
         let self_ = downstream.clone();
 
-        let _notify_task = task::spawn(async move {
+        let notify_task = task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut first_sent = false;
             loop {
@@ -311,7 +318,7 @@ impl Downstream {
                         );
                         break;
                     }
-                    task::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
             if self_.safe_lock(|d| d.hashrate_updated).unwrap() {
@@ -323,10 +330,14 @@ impl Downstream {
                 &host
             );
         });
+        if let Some(to_kill) = to_kill.as_ref() {
+            to_kill.safe_lock(|tks| tks.push(notify_task)).unwrap();
+        }
     }
 
     /// Accept connections from one or more SV1 Downstream roles (SV1 Mining Devices) and create a
     /// new `Downstream` for each connection.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_connections(
         downstream_addr: SocketAddr,
         tx_sv1_submit: Sender<DownstreamMessages>,
@@ -335,13 +346,12 @@ impl Downstream {
         bridge: Arc<Mutex<crate::proxy::Bridge>>,
         downstream_difficulty_config: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
-    ) -> async_std::task::JoinHandle<()> {
+        to_kill: Option<Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
+    ) -> tokio::task::JoinHandle<()> {
         task::spawn(async move {
             let downstream_listener = TcpListener::bind(downstream_addr).await.unwrap();
-            let mut downstream_incoming = downstream_listener.incoming();
 
-            while let Some(stream) = downstream_incoming.next().await {
-                let stream = stream.expect("Err on SV1 Downstream connection stream");
+            while let Ok((stream, _address)) = downstream_listener.accept().await {
                 let expected_hash_rate = downstream_difficulty_config.min_individual_miner_hashrate;
                 let open_sv1_downstream = bridge
                     .safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate))
@@ -363,6 +373,7 @@ impl Downstream {
                             host,
                             downstream_difficulty_config.clone(),
                             upstream_difficulty_config.clone(),
+                            to_kill.clone(),
                         )
                         .await;
                     }

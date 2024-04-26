@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "demand-solo-all-in-one"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-channel 1.9.0",
  "async-recursion 0.3.2",

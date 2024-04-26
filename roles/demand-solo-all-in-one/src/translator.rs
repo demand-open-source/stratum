@@ -173,7 +173,8 @@ pub async fn main_translator(
         );
 
         // Accept connections from one or more SV1 Downstream roles (SV1 Mining Devices)
-        let jn = downstream_sv1::Downstream::accept_connections(
+        let to_kills = Arc::new(Mutex::new(Vec::new()));
+        let jh = downstream_sv1::Downstream::accept_connections(
             downstream_addr,
             tx_sv1_bridge,
             tx_sv1_notify,
@@ -181,10 +182,15 @@ pub async fn main_translator(
             b,
             proxy_config.downstream_difficulty_config,
             diff_config,
+            Some(to_kills.clone()),
         );
-        tokio::task::spawn(async {
+        tokio::task::spawn(async move {
             let _ = free_socket_rx.await;
-            jn.cancel().await;
+            to_kills
+                .safe_lock(|jhs| jhs.iter().for_each(|jh| jh.abort()))
+                .unwrap();
+            jh.abort();
+            jh.await.unwrap();
         });
     }); // End of init task
 

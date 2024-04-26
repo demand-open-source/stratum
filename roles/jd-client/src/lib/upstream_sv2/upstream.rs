@@ -1,5 +1,4 @@
 use super::super::downstream::DownstreamMiningNode as Downstream;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::super::{
     error::{
