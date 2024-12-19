@@ -1,4 +1,4 @@
-#![cfg_attr(feature = "no_std", no_std)]
+#![no_std]
 
 //! # Mining Protocol
 //! ## Channels
@@ -216,9 +216,11 @@ impl Ord for Target {
 
 // WARNING: do not derive Copy on this type. Some operations performed to a copy of an extranonce
 // do not affect the original, and this may lead to different extranonce inconsistency
-/// Extranonce bytes which need to be added to the coinbase to form a fully valid submission:
-/// (full coinbase = coinbase_tx_prefix + extranonce + coinbase_tx_suffix).
+/// Extranonce bytes which need to be added to the coinbase to form a fully valid submission.
+///
 /// Representation is in big endian, so tail is for the digits relative to smaller powers
+///
+/// `full coinbase = coinbase_tx_prefix + extranonce + coinbase_tx_suffix`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extranonce {
     extranonce: alloc::vec::Vec<u8>,
@@ -350,9 +352,9 @@ impl From<&mut ExtendedExtranonce> for Extranonce {
 }
 
 #[derive(Debug, Clone)]
-/// Downstram and upstream are not global terms but are relative
-/// to an actor of the protocol P. In simple terms, upstream is the part of the protocol that a
-/// user P sees when he looks above and downstream when he looks beneath.
+/// Downstram and upstream are relative to an actor of the protocol P. In simple terms, upstream is
+/// the part of the protocol that a user P sees when he looks above and downstream when he looks
+/// beneath.
 ///
 /// An ExtendedExtranonce is defined by 3 ranges:
 ///
@@ -391,7 +393,6 @@ impl From<&mut ExtendedExtranonce> for Extranonce {
 /// range_2 -> 32..32 no more downstream
 ///
 ///
-///
 /// About how the pool work having both extended and standard downstreams:
 ///
 /// the pool reserve the first 16 bytes for herself and let downstreams change the lase 16, so
@@ -411,7 +412,6 @@ impl From<&mut ExtendedExtranonce> for Extranonce {
 /// 0000 0000 0000 0000      0000 0000 0000 0000
 /// where the second will be
 /// 0000 0000 0000 0000      0000 0000 0000 0001 ecc ecc
-///
 ///
 ///
 /// ExtendedExtranonce type is meant to be used in cases where the extranonce length is not
