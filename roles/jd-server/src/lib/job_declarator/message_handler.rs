@@ -84,7 +84,7 @@ impl ParseClientJobDeclarationMessages for JobDeclaratorDownstream {
 
             for (i, id) in hash_list.iter().enumerate() {
                 let hash = Hash256::from_slice(id).unwrap();
-                let id_ = Txid::from_hash(hash);
+                let id_: Txid = hash.into();
                 if mempool.contains_key(&id_) {
                     transactions_with_state[i] = TransactionState::PresentInMempool(id_);
                     known_transactions.push(id_);
@@ -171,7 +171,7 @@ impl ParseClientJobDeclarationMessages for JobDeclaratorDownstream {
                                 )))? as usize;
                         // insert the missing transactions in the mempool
                         transactions_with_state[index] =
-                            TransactionState::PresentInMempool(transaction.txid());
+                            TransactionState::PresentInMempool(transaction.compute_txid());
                     }
                     self.add_txs_to_mempool
                         .add_txs_to_mempool_inner

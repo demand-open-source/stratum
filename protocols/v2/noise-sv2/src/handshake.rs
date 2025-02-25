@@ -30,6 +30,8 @@
 // mandatory for communication across external networks (e.g., between a local mining proxy and a
 // remote pool).
 
+use alloc::{string::String, vec::Vec};
+
 use crate::{aed_cipher::AeadCipher, cipher_state::CipherState, NOISE_HASHED_PROTOCOL_NAME_CHACHA};
 use chacha20poly1305::ChaCha20Poly1305;
 use secp256k1::{
@@ -98,14 +100,20 @@ pub trait HandshakeOp<Cipher: AeadCipher>: CipherState<Cipher> {
     // Generates a fresh key pair, consisting of a secret key and a corresponding public key,
     // using the [`Secp256k1`] elliptic curve. If the generated public key does not match the
     // expected parity, a new key pair is generated to ensure consistency.
+    #[allow(dead_code)]
+    #[cfg(feature = "std")]
     fn generate_key() -> Keypair {
+        Self::generate_key_with_rng(&mut rand::thread_rng())
+    }
+    #[inline]
+    fn generate_key_with_rng<R: rand::Rng + ?Sized>(rng: &mut R) -> Keypair {
         let secp = Secp256k1::new();
-        let (secret_key, _) = secp.generate_keypair(&mut rand::thread_rng());
+        let (secret_key, _) = secp.generate_keypair(rng);
         let kp = Keypair::from_secret_key(&secp, &secret_key);
         if kp.x_only_public_key().1 == crate::PARITY {
             kp
         } else {
-            Self::generate_key()
+            Self::generate_key_with_rng(rng)
         }
     }
 
@@ -163,6 +171,18 @@ pub trait HandshakeOp<Cipher: AeadCipher>: CipherState<Cipher> {
         let out_1 = Self::hmac_hash(&temp_key, &[0x1]);
         let out_2 = Self::hmac_hash(&temp_key, &[&out_1[..], &[0x2][..]].concat());
         (out_1, out_2)
+    }
+
+    #[allow(dead_code)]
+    fn hkdf_3(
+        chaining_key: &[u8; 32],
+        input_key_material: &[u8],
+    ) -> ([u8; 32], [u8; 32], [u8; 32]) {
+        let temp_key = Self::hmac_hash(chaining_key, input_key_material);
+        let out_1 = Self::hmac_hash(&temp_key, &[0x1]);
+        let out_2 = Self::hmac_hash(&temp_key, &[&out_1[..], &[0x2][..]].concat());
+        let out_3 = Self::hmac_hash(&temp_key, &[&out_2[..], &[0x3][..]].concat());
+        (out_1, out_2, out_3)
     }
 
     // Mixes the input key material into the current chaining key (`ck`) and initializes the
@@ -254,10 +274,10 @@ pub trait HandshakeOp<Cipher: AeadCipher>: CipherState<Cipher> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use quickcheck::{Arbitrary, TestResult};
-    use quickcheck_macros;
-    use secp256k1::{ecdh::SharedSecret, SecretKey, XOnlyPublicKey};
-    use std::convert::TryInto;
+    use alloc::string::ToString;
+    use core::convert::TryInto;
+    use quickcheck::Arbitrary;
+    use secp256k1::SecretKey;
 
     struct TestHandShake {
         k: Option<[u8; 32]>,

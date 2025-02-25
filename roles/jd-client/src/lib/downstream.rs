@@ -659,7 +659,7 @@ impl ParseDownstreamCommonMessages<roles_logic_sv2::routing_logic::NoRouting>
     }
 }
 
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use network_helpers_sv2::noise_connection::Connection;
 use std::net::SocketAddr;
 use tokio::{
     net::TcpListener,
@@ -683,7 +683,7 @@ pub async fn listen_for_downstream_mining(
     jd: Option<Arc<Mutex<JobDeclarator>>>,
 ) -> Result<Arc<Mutex<DownstreamMiningNode>>, Error> {
     info!("Listening for downstream mining connections on {}", address);
-    let listner = TcpListener::bind(address).await.unwrap();
+    let listner = TcpListener::bind(address).await?;
 
     if let Ok((stream, _)) = listner.accept().await {
         let responder = Responder::from_authority_kp(

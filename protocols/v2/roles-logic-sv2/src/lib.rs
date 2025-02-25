@@ -1,39 +1,22 @@
-//! Provides all relevant types, traits and functions to implement a valid SV2 role.
+//! # Stratum V2 Roles-Logic Library
 //!
-//! - For channel and job management, see [`channel_logic`], which utilizes [`job_creator`] and
-//!   [`job_dispatcher`]
-//! - For message handling, the traits in [`handlers`] should be implemented
-//! - For basic traits every implementation should use, see [`common_properties`]
-//! - Routers in [`routing_logic`] are used by the traits in `handlers` to decide which
-//!   downstream/upstream to relay/send by using [`selectors`]
-//! - For serializing/deserializing messages, see [`parsers`]
-//! - see [`utils`] for helpers such as safe locking, target and merkle root calculations
+//! roles_logic_sv2 provides the core logic and utilities for implementing roles in the Stratum V2
+//! (Sv2) protocol, such as miners, pools, and proxies. It abstracts message handling, channel
+//! management, job creation, and routing logic, enabling efficient and secure communication across
+//! upstream and downstream connections.
 //!
-//!```txt
-//! MiningDevice:
-//!     common_properties::IsUpstream +
-//!     common_properties::IsMiningUpstream +
-//!     handlers::common::ParseUpstreamCommonMessages +
-//!     handlers::mining::ParseUpstreamMiningMessages +
+//! ## Usage
 //!
-//! Pool:
-//!     common_properties::IsDownstream +
-//!     common_properties::IsMiningDownstream +
-//!     handlers::common::ParseDownstreamCommonMessages +
-//!     handlers::mining::ParseDownstreamMiningMessages +
-//!
-//! ProxyDownstreamConnetion:
-//!     common_properties::IsDownstream +
-//!     common_properties::IsMiningDownstream +
-//!     handlers::common::ParseDownstreamCommonMessages +
-//!     handlers::mining::ParseDownstreamMiningMessages +
-//!
-//! ProxyUpstreamConnetion:
-//!     common_properties::IsUpstream +
-//!     common_properties::IsMiningUpstream +
-//!     handlers::common::ParseUpstreamCommonMessages +
-//!     handlers::mining::ParseUpstreamMiningMessages +
+//! To include this crate in your project, run:
+//! ```bash
+//! $ cargo add roles_logic_sv2
 //! ```
+//!
+//! ## Build Options
+//!
+//! This crate can be built with the following features:
+//!
+//! - `prop_test`: Enables support for property testing in [`template_distribution_sv2`] crate.
 pub mod channel_logic;
 pub mod common_properties;
 pub mod errors;

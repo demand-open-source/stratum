@@ -1,9 +1,6 @@
 name: Semver Check
 
 on:
-  push:
-    branches:
-      - "main"
   pull_request:
     branches:
       - "main"
@@ -14,7 +11,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: actions-rs/toolchain@v1
@@ -52,16 +49,12 @@ jobs:
         working-directory: utils/buffer
         run: cargo semver-checks
 
-      - name: Run semver checks for protocols/v2/binary-sv2/no-serde-sv2/codec
-        working-directory: protocols/v2/binary-sv2/no-serde-sv2/codec
+      - name: Run semver checks for protocols/v2/binary-sv2/codec
+        working-directory: protocols/v2/binary-sv2/codec
         run: cargo semver-checks
 
-      - name: Run semver checks for protocols/v2/binary-sv2/serde-sv2
-        working-directory: protocols/v2/binary-sv2/serde-sv2
-        run: cargo semver-checks
-
-      - name: Run semver checks for protocols/v2/binary-sv2/binary-sv2
-        working-directory: protocols/v2/binary-sv2/binary-sv2
+      - name: Run semver checks for protocols/v2/binary-sv2
+        working-directory: protocols/v2/binary-sv2
         run: cargo semver-checks
 
       - name: Run semver checks for protocols/v2/const-sv2

@@ -1,7 +1,4 @@
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
@@ -38,13 +35,9 @@ jobs:
           cargo build --manifest-path=roles/Cargo.toml
           cargo build --manifest-path=utils/Cargo.toml
 
-      - name: Roles Integration Tests
-        run: |
-          cargo test --manifest-path=roles/Cargo.toml --verbose --test '*' -- --nocapture
-
       - name: Run sv1-client-and-server example
         run: |
-          cargo run --manifest-path=examples/sv1-client-and-server/Cargo.toml --bin client_and_server -- 60
+          cargo run --manifest-path=protocols/v1/Cargo.toml --example client_and_server 30
 
       - name: interop-test
         run: |
@@ -86,10 +79,10 @@ jobs:
         run: |
           cargo test --manifest-path=protocols/Cargo.toml --features prop_test
 
-      - name: Run ping-pong-with-noise example
+      - name: Run ping-pong-encrypted example
         run: |
-          cargo run --manifest-path=examples/ping-pong-with-noise/Cargo.toml --bin ping_pong_with_noise -- 10
+          cargo run --manifest-path=examples/ping-pong-encrypted/Cargo.toml
 
-      - name: Run ping-pong-without-noise example
+      - name: Run ping-pong example
         run: |
-          cargo run --manifest-path=examples/ping-pong-without-noise/Cargo.toml --bin ping_pong_without_noise -- 10
+          cargo run --manifest-path=examples/ping-pong/Cargo.toml

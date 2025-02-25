@@ -7,7 +7,7 @@ use async_channel::{Receiver, Sender};
 use codec_sv2::{HandshakeRole, Initiator};
 use error_handling::handle_result;
 use key_utils::Secp256k1PublicKey;
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use network_helpers_sv2::noise_connection::Connection;
 use roles_logic_sv2::{
     handlers::template_distribution::ParseServerTemplateDistributionMessages,
     parsers::{PoolMessages, TemplateDistribution},
@@ -18,7 +18,7 @@ use roles_logic_sv2::{
 };
 use std::{convert::TryInto, net::SocketAddr, sync::Arc};
 use tokio::{net::TcpStream, task};
-use tracing::info;
+use tracing::{info, warn};
 
 mod message_handler;
 mod setup_connection;
@@ -45,7 +45,15 @@ impl TemplateRx {
         coinbase_out_len: u32,
         expected_tp_authority_public_key: Option<Secp256k1PublicKey>,
     ) -> PoolResult<()> {
-        let stream = TcpStream::connect(address).await?;
+        let stream = loop {
+            match TcpStream::connect(address).await {
+                Ok(stream) => break stream,
+                Err(err) => {
+                    warn!("Failed to connect to {}: {}. Retrying...", address, err);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        };
         info!("Connected to template distribution server at {}", address);
 
         let initiator = match expected_tp_authority_public_key {

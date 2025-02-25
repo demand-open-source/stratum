@@ -6,20 +6,14 @@
 [![license](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](https://github.com/stratum-mining/stratum/blob/main/LICENSE.md)
 [![codecov](https://codecov.io/gh/stratum-mining/stratum/branch/main/graph/badge.svg)](https://app.codecov.io/gh/stratum-mining/stratum/tree/main/protocols%2Fv2%2Fcommon_messages_sv2)
 
-`common_messages_sv2` is a Rust crate that implements a set of messages shared across all Stratum V2 subprotocols.
+`common_messages_sv2` is a Rust `#![no-std]` crate that implements a set of messages shared across all Stratum V2 subprotocols.
 
 For further information, please refer to [Stratum V2 documentation - Common Messages](https://stratumprotocol.org/specification/03-Protocol-Overview/#36-common-protocol-messages).
 
 ## Build Options
 
 This crate can be built with the following features:
-
- - `std`: Enables support for standard library features.
- - `serde`: Enables support for serialization and deserialization using Serde.
  - `quickcheck`: Enables support for property-based testing using QuickCheck.
-
-    *Note that `serde` feature flag is only used for the Message Generator, and deprecated for any
-    other kind of usage.  It will likely be fully deprecated in the future.*
 
 ## Usage
 

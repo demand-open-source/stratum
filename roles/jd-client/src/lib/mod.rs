@@ -20,7 +20,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use tokio::task::AbortHandle;
+use tokio::{sync::Notify, task::AbortHandle};
 
 use tracing::{error, info};
 
@@ -54,114 +54,153 @@ pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 /// switching to backup Pools in case of declared custom jobs refused by JDS (which is Pool side).
 /// As a solution of last-resort, it is able to switch to Solo Mining until new safe Pools appear
 /// in the market.
+#[derive(Debug, Clone)]
 pub struct JobDeclaratorClient {
     /// Configuration of the proxy server [`JobDeclaratorClient`] is connected to.
     config: ProxyConfig,
+    // Used for notifying the [`JobDeclaratorClient`] to shutdown gracefully.
+    shutdown: Arc<Notify>,
 }
 
 impl JobDeclaratorClient {
     pub fn new(config: ProxyConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            shutdown: Arc::new(Notify::new()),
+        }
     }
 
     pub async fn start(self) {
         let mut upstream_index = 0;
-        let mut interrupt_signal_future = Box::pin(tokio::signal::ctrl_c().fuse());
 
         // Channel used to manage failed tasks
         let (tx_status, rx_status) = unbounded();
 
         let task_collector = Arc::new(Mutex::new(vec![]));
 
-        let proxy_config = &self.config;
+        tokio::spawn({
+            let shutdown_signal = self.shutdown.clone();
+            async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    info!("Interrupt received");
+                    shutdown_signal.notify_one();
+                }
+            }
+        });
 
-        loop {
+        let proxy_config = self.config;
+        'outer: loop {
             let task_collector = task_collector.clone();
             let tx_status = tx_status.clone();
+            let proxy_config = proxy_config.clone();
+            let root_handler;
             if let Some(upstream) = proxy_config.upstreams.get(upstream_index) {
-                self.initialize_jd(tx_status.clone(), task_collector.clone(), upstream.clone())
-                    .await;
+                let tx_status = tx_status.clone();
+                let task_collector = task_collector.clone();
+                let upstream = upstream.clone();
+                root_handler = tokio::spawn(async move {
+                    Self::initialize_jd(proxy_config, tx_status, task_collector, upstream).await;
+                });
             } else {
-                self.initialize_jd_as_solo_miner(tx_status.clone(), task_collector.clone())
+                let tx_status = tx_status.clone();
+                let task_collector = task_collector.clone();
+                root_handler = tokio::spawn(async move {
+                    Self::initialize_jd_as_solo_miner(
+                        proxy_config,
+                        tx_status.clone(),
+                        task_collector.clone(),
+                    )
                     .await;
+                });
             }
             // Check all tasks if is_finished() is true, if so exit
             loop {
-                let task_status = select! {
-                    task_status = rx_status.recv().fuse() => task_status,
-                    interrupt_signal = interrupt_signal_future => {
-                        match interrupt_signal {
-                            Ok(()) => {
-                                info!("Interrupt received");
-                            },
-                            Err(err) => {
-                                error!("Unable to listen for interrupt signal: {}", err);
-                                // we also shut down in case of error
-                            },
+                select! {
+                    task_status = rx_status.recv().fuse() => {
+                        if let Ok(task_status) = task_status {
+                            match task_status.state {
+                                // Should only be sent by the downstream listener
+                                status::State::DownstreamShutdown(err) => {
+                                    error!("SHUTDOWN from: {}", err);
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    task_collector
+                                        .safe_lock(|s| {
+                                            for handle in s {
+                                                handle.abort();
+                                            }
+                                        })
+                                        .unwrap();
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    break;
+                                }
+                                status::State::UpstreamShutdown(err) => {
+                                    error!("SHUTDOWN from: {}", err);
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    task_collector
+                                        .safe_lock(|s| {
+                                            for handle in s {
+                                                handle.abort();
+                                            }
+                                        })
+                                        .unwrap();
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    break;
+                                }
+                                status::State::UpstreamRogue => {
+                                    error!("Changing Pool");
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    task_collector
+                                        .safe_lock(|s| {
+                                            for handle in s {
+                                                handle.abort();
+                                            }
+                                        })
+                                        .unwrap();
+                                    upstream_index += 1;
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    break;
+                                }
+                                status::State::Healthy(msg) => {
+                                    info!("HEALTHY message: {}", msg);
+                                }
+                            }
+                        } else {
+                            info!("Received unknown task. Shutting down.");
+                            task_collector
+                                .safe_lock(|s| {
+                                    for handle in s {
+                                        handle.abort();
+                                    }
+                                })
+                                .unwrap();
+                            root_handler.abort();
+                            break 'outer;
                         }
-                        std::process::exit(0);
+                    },
+                    _ = self.shutdown.notified().fuse() => {
+                        info!("Shutting down gracefully...");
+                        task_collector
+                            .safe_lock(|s| {
+                                for handle in s {
+                                    handle.abort();
+                                }
+                            })
+                            .unwrap();
+                        root_handler.abort();
+                        break 'outer;
                     }
                 };
-                let task_status: status::Status = task_status.unwrap();
-
-                match task_status.state {
-                    // Should only be sent by the downstream listener
-                    status::State::DownstreamShutdown(err) => {
-                        error!("SHUTDOWN from: {}", err);
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        task_collector
-                            .safe_lock(|s| {
-                                for handle in s {
-                                    handle.abort();
-                                }
-                            })
-                            .unwrap();
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        break;
-                    }
-                    status::State::UpstreamShutdown(err) => {
-                        error!("SHUTDOWN from: {}", err);
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        task_collector
-                            .safe_lock(|s| {
-                                for handle in s {
-                                    handle.abort();
-                                }
-                            })
-                            .unwrap();
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        break;
-                    }
-                    status::State::UpstreamRogue => {
-                        error!("Changin Pool");
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        task_collector
-                            .safe_lock(|s| {
-                                for handle in s {
-                                    handle.abort();
-                                }
-                            })
-                            .unwrap();
-                        upstream_index += 1;
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        break;
-                    }
-                    status::State::Healthy(msg) => {
-                        info!("HEALTHY message: {}", msg);
-                    }
-                }
             }
         }
     }
 
     async fn initialize_jd_as_solo_miner(
-        &self,
+        proxy_config: ProxyConfig,
         tx_status: async_channel::Sender<status::Status<'static>>,
         task_collector: Arc<Mutex<Vec<AbortHandle>>>,
     ) {
-        let proxy_config = &self.config;
         let timeout = proxy_config.timeout;
-        let miner_tx_out = proxy_config::get_coinbase_output(proxy_config).unwrap();
+        let miner_tx_out = proxy_config::get_coinbase_output(&proxy_config).unwrap();
 
         // When Downstream receive a share that meets bitcoin target it transformit in a
         // SubmitSolution and send it to the TemplateReceiver
@@ -211,12 +250,11 @@ impl JobDeclaratorClient {
     }
 
     async fn initialize_jd(
-        &self,
+        proxy_config: ProxyConfig,
         tx_status: async_channel::Sender<status::Status<'static>>,
         task_collector: Arc<Mutex<Vec<AbortHandle>>>,
         upstream_config: proxy_config::Upstream,
     ) {
-        let proxy_config = &self.config;
         let timeout = proxy_config.timeout;
         let test_only_do_not_send_solution_to_tp = proxy_config
             .test_only_do_not_send_solution_to_tp
@@ -315,7 +353,7 @@ impl JobDeclaratorClient {
         };
 
         // Wait for downstream to connect
-        let downstream = downstream::listen_for_downstream_mining(
+        let downstream = match downstream::listen_for_downstream_mining(
             downstream_addr,
             Some(upstream),
             send_solution,
@@ -329,7 +367,10 @@ impl JobDeclaratorClient {
             Some(jd.clone()),
         )
         .await
-        .unwrap();
+        {
+            Ok(d) => d,
+            Err(_e) => return,
+        };
 
         TemplateRx::connect(
             SocketAddr::new(IpAddr::from_str(ip_tp.as_str()).unwrap(), port_tp),
@@ -344,6 +385,16 @@ impl JobDeclaratorClient {
             test_only_do_not_send_solution_to_tp,
         )
         .await;
+    }
+
+    /// Closes JDC role and any open connection associated with it.
+    ///
+    /// Note that this method will result in a full exit of the  running
+    /// jd-client and any open connection most be re-initiated upon new
+    /// start.
+    #[allow(dead_code)]
+    pub fn shutdown(&self) {
+        self.shutdown.notify_one();
     }
 }
 
@@ -378,5 +429,43 @@ impl PoolChangerTrigger {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ext_config::{Config, File, FileFormat};
+
+    use crate::*;
+
+    #[tokio::test]
+    async fn test_shutdown() {
+        let config_path = "config-examples/jdc-config-hosted-example.toml";
+        let config: ProxyConfig = match Config::builder()
+            .add_source(File::new(config_path, FileFormat::Toml))
+            .build()
+        {
+            Ok(settings) => match settings.try_deserialize::<ProxyConfig>() {
+                Ok(c) => c,
+                Err(e) => {
+                    dbg!(&e);
+                    return;
+                }
+            },
+            Err(e) => {
+                dbg!(&e);
+                return;
+            }
+        };
+        let jdc = JobDeclaratorClient::new(config.clone());
+        let cloned = jdc.clone();
+        tokio::spawn(async move {
+            cloned.start().await;
+        });
+        jdc.shutdown();
+        let ip = config.downstream_address.clone();
+        let port = config.downstream_port;
+        let jdc_addr = format!("{}:{}", ip, port);
+        assert!(std::net::TcpListener::bind(jdc_addr).is_ok());
     }
 }

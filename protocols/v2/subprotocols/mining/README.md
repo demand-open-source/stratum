@@ -6,22 +6,13 @@
 [![license](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](https://github.com/stratum-mining/stratum/blob/main/LICENSE.md)
 [![codecov](https://codecov.io/gh/stratum-mining/stratum/branch/main/graph/badge.svg)](https://app.codecov.io/gh/stratum-mining/stratum/tree/main/protocols%2Fv2%2Fmining_sv2)
 
-`mining_sv2` is a Rust crate that implements a set of  messages defined in the Mining protocol of Stratum V2.
+`mining_sv2` is a Rust `#![no_std]` crate that implements a set of  messages defined in the Mining protocol of Stratum V2.
 The Mining protocol enables:
 - distribution of work to mining devices
 - submission of proof of work from mining devices
 - notification of custom work to pool (in conjunction with Job Declaration Subprotocol) 
 
 For further information about the messages, please refer to [Stratum V2 documentation - Mining](https://stratumprotocol.org/specification/05-Mining-Protocol/).
-
-## Build Options
-
-This crate can be built with the following features:
-- `no_std`: Disables the standard library.
-- `with_serde`: Enables support for serialization and deserialization using Serde.
-
-**Note that `with_serde` feature flag is only used for the Message Generator, and deprecated for any
-other kind of usage. It will likely be fully deprecated in the future.**
 
 ## Usage
 

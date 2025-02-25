@@ -1,14 +1,16 @@
-use async_std::net::TcpStream;
-use std::{convert::TryInto, net::SocketAddr, ops::Div};
-
-use async_channel::{bounded, Receiver, Sender};
-use async_std::{io::BufReader, prelude::*, task};
+use crate::{job::Job, miner::Miner};
+use async_channel::{unbounded, Receiver, Sender};
 use num_bigint::BigUint;
 use num_traits::FromPrimitive;
+use primitive_types::U256;
 use roles_logic_sv2::utils::Mutex;
-use std::{sync::Arc, time};
-
-use stratum_common::bitcoin::util::uint::Uint256;
+use std::{convert::TryInto, net::SocketAddr, ops::Div, sync::Arc, time};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
+    task,
+};
+use tracing::{error, info, warn};
 use v1::{
     client_to_server,
     error::Error,
@@ -16,8 +18,6 @@ use v1::{
     utils::{Extranonce, HexU32Be},
     ClientStatus, IsClient,
 };
-
-use crate::{job::Job, miner::Miner};
 
 /// Represents the Mining Device client which is connected to a Upstream node (either a SV1 Pool
 /// server or a SV1 <-> SV2 Translator Proxy server).
@@ -67,32 +67,38 @@ impl Client {
     ///    the information from `sender_share`, it is formatted as a `v1::client_to_server::Submit`
     ///    and then serialized into a json message that is sent to the Upstream via
     ///    `sender_outgoing`.
-    pub async fn connect(client_id: u32, upstream_addr: SocketAddr) {
-        let stream = std::sync::Arc::new(TcpStream::connect(upstream_addr).await.unwrap());
-        let (reader, writer) = (stream.clone(), stream);
+    pub async fn connect(
+        client_id: u32,
+        upstream_addr: SocketAddr,
+        single_submit: bool,
+        custom_target: Option<[u8; 32]>,
+    ) {
+        let stream = TcpStream::connect(upstream_addr).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
 
         // `sender_incoming` listens on socket for incoming messages from the Upstream and sends
         // messages to the `receiver_incoming` to be parsed and handled by the `Client`
-        let (sender_incoming, receiver_incoming) = bounded(10);
+        let (sender_incoming, receiver_incoming) = unbounded();
         // `sender_outgoing` sends the message parsed by the `Client` to the `receiver_outgoing`
         // which writes the messages to the socket to the Upstream
-        let (sender_outgoing, receiver_outgoing) = bounded(10);
+        let (sender_outgoing, receiver_outgoing) = unbounded();
         // `sender_share` sends job share results to the `receiver_share` where the job share
         // results are formated into a "mining.submit" messages that is then sent to the
         // Upstream via `sender_outgoing`
-        let (sender_share, receiver_share) = bounded(10);
+        let (sender_share, receiver_share) = unbounded();
 
+        let (send_stop_submitting, mut recv_stop_submitting) = tokio::sync::watch::channel(false);
         // Instantiates a new `Miner` (a mock of an actual Mining Device) with a job id of 0.
         let miner = Arc::new(Mutex::new(Miner::new(0)));
 
         // Sets an initial target for the `Miner`.
         // TODO: This is hard coded for the purposes of a demo, should be set by the SV1
         // `mining.set_difficulty` message received from the Upstream role
-        let target_vec: [u8; 32] = [
+        let target_vec: [u8; 32] = custom_target.unwrap_or([
             0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
-        ];
-        let default_target = Uint256::from_be_bytes(target_vec);
+        ]);
+        let default_target = U256::from_big_endian(target_vec.as_ref());
         miner.safe_lock(|m| m.new_target(default_target)).unwrap();
 
         let miner_cloned = miner.clone();
@@ -100,22 +106,22 @@ impl Client {
         // Reads messages sent by the Upstream from the socket to be passed to the
         // `receiver_incoming`
         task::spawn(async move {
-            let mut messages = BufReader::new(&*reader).lines();
-            while let Some(message) = messages.next().await {
+            let mut messages = BufReader::new(reader).lines();
+            while let Ok(message) = messages.next_line().await {
                 match message {
-                    Ok(msg) => {
+                    Some(msg) => {
                         if let Err(e) = sender_incoming.send(msg).await {
-                            eprintln!("Failed to send message to receiver_incoming: {:?}", e);
+                            error!("Failed to send message to receiver_incoming: {:?}", e);
                             break; // Exit the loop if sending fails
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Error reading from socket: {:?}", e);
+                    None => {
+                        error!("Error reading from socket");
                         break; // Exit the loop on read failure
                     }
                 }
             }
-            eprintln!("Reader task terminated.");
+            warn!("Reader task terminated.");
         });
 
         // Waits to receive a message from `sender_outgoing` and writes it to the socket for the
@@ -123,7 +129,10 @@ impl Client {
         task::spawn(async move {
             loop {
                 let message: String = receiver_outgoing.recv().await.unwrap();
-                (&*writer).write_all(message.as_bytes()).await.unwrap();
+                (writer).write_all(message.as_bytes()).await.unwrap();
+                if message.contains("mining.submit") && single_submit {
+                    send_stop_submitting.send(true).unwrap();
+                }
             }
         });
 
@@ -166,43 +175,53 @@ impl Client {
                 // Sends relevant candidate block header values needed to construct a
                 // `mining.submit` message to the `receiver_share` in the task that is responsible
                 // for sending messages to the Upstream node.
-                sender_share
+                if sender_share
                     .try_send((nonce, job_id.unwrap(), version.unwrap(), time))
-                    .unwrap();
+                    .is_err()
+                {
+                    warn!("Share channel is not available");
+                    break;
+                }
             }
             miner_cloned
                 .safe_lock(|m| m.header.as_mut().map(|h| h.nonce += 1))
                 .unwrap();
         });
-
         // Task to receive relevant candidate block header values needed to construct a
         // `mining.submit` message. This message is contructed as a `client_to_server::Submit` and
         // then serialized into json to be sent to the Upstream via the `sender_outgoing` sender.
         let cloned = client.clone();
         task::spawn(async move {
-            let recv = receiver_share.clone();
-            loop {
-                let (nonce, job_id, _version, ntime) = recv.recv().await.unwrap();
-                if cloned.clone().safe_lock(|c| c.status).unwrap() != ClientStatus::Subscribed {
-                    continue;
-                }
-                let extra_nonce2: Extranonce =
-                    vec![0; cloned.safe_lock(|c| c.extranonce2_size.unwrap()).unwrap()]
-                        .try_into()
-                        .unwrap();
-                let submit = client_to_server::Submit {
-                    id: 0,
-                    user_name: "user".into(), // TODO: user name should NOT be hardcoded
-                    job_id: job_id.to_string(),
-                    extra_nonce2,
-                    time: HexU32Be(ntime),
-                    nonce: HexU32Be(nonce),
-                    version_bits: None,
-                };
-                let message: json_rpc::Message = submit.into();
-                let message = format!("{}\n", serde_json::to_string(&message).unwrap());
-                sender_outgoing_clone.send(message).await.unwrap();
-            }
+            tokio::select!(
+              _ = recv_stop_submitting.changed() => {
+                warn!("Stopping miner")
+              },
+              _ = async {
+              let recv = receiver_share.clone();
+              loop {
+                  let (nonce, job_id, _version, ntime) = recv.recv().await.unwrap();
+                  if cloned.clone().safe_lock(|c| c.status).unwrap() != ClientStatus::Subscribed {
+                      continue;
+                  }
+                  let extra_nonce2: Extranonce =
+                      vec![0; cloned.safe_lock(|c| c.extranonce2_size.unwrap()).unwrap()]
+                          .try_into()
+                          .unwrap();
+                  let submit = client_to_server::Submit {
+                      id: 0,
+                      user_name: "user".into(), // TODO: user name should NOT be hardcoded
+                      job_id: job_id.to_string(),
+                      extra_nonce2,
+                      time: HexU32Be(ntime),
+                      nonce: HexU32Be(nonce),
+                      version_bits: None,
+                  };
+                  let message: json_rpc::Message = submit.into();
+                  let message = format!("{}\n", serde_json::to_string(&message).unwrap());
+                  sender_outgoing_clone.send(message).await.unwrap();
+              }
+              } => {}
+            )
         });
         let recv_incoming = client.safe_lock(|c| c.receiver_incoming.clone()).unwrap();
 
@@ -222,8 +241,11 @@ impl Client {
         // Waits for the `sender_incoming` to get message line from socket to be parsed by the
         // `Client`
         loop {
-            let incoming = recv_incoming.recv().await.unwrap();
-            Self::parse_message(client.clone(), Ok(incoming)).await;
+            if let Ok(incoming) = recv_incoming.clone().recv().await {
+                Self::parse_message(client.clone(), Ok(incoming)).await;
+            } else {
+                warn!("Error reading from socket via `recv_incoming` channel")
+            }
         }
     }
 
@@ -234,7 +256,7 @@ impl Client {
     ) {
         // If we have a line (1 line represents 1 sv1 incoming message), then handle that message
         if let Ok(line) = incoming_message {
-            println!(
+            info!(
                 "CLIENT {} - Received: {}",
                 self_.safe_lock(|s| s.client_id).unwrap(),
                 line
@@ -254,7 +276,7 @@ impl Client {
     /// Send SV1 messages to the receiver_outgoing which writes to the socket (aka Upstream node)
     async fn send_message(sender: Sender<String>, msg: json_rpc::Message) {
         let msg = format!("{}\n", serde_json::to_string(&msg).unwrap());
-        println!(" - Send: {}", &msg);
+        info!(" - Send: {}", &msg);
         sender.send(msg).await.unwrap();
     }
 
@@ -448,10 +470,10 @@ impl IsClient<'static> for Client {
     }
 }
 
-fn target_from_difficulty(diff: f64) -> Option<Uint256> {
+fn target_from_difficulty(diff: f64) -> Option<U256> {
     let pdiff = 26959946667150639794667015087019630673637144422540572481103610249215.0;
     if diff == 0.0 {
-        Some(Uint256::from_be_bytes([0; 32]))
+        Some(U256::from_big_endian(&[0; 32]))
     } else {
         let t = pdiff.div(diff);
         let as_big_int: BigUint = match t > 0.0 {
@@ -465,7 +487,7 @@ fn target_from_difficulty(diff: f64) -> Option<Uint256> {
             let mut front_padding = vec![0; 32 - bytes.len()];
             front_padding.append(&mut bytes);
             let as_u256: [u8; 32] = front_padding.try_into().unwrap();
-            Some(Uint256::from_be_bytes(as_u256))
+            Some(U256::from_big_endian(as_u256.as_ref()))
         }
     }
 }

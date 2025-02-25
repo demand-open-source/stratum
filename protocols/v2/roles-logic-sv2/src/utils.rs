@@ -1,43 +1,51 @@
+//! # Collection of Helper Primitives
+//!
+//! Provides a collection of utilities and helper structures used throughout the Stratum V2
+//! protocol implementation. These utilities simplify common tasks, such as ID generation and
+//! management, mutex management, difficulty target calculations, merkle root calculations, and
+//! more.
+
+use binary_sv2::U256;
+use bitcoin::Block;
+use job_declaration_sv2::{DeclareMiningJob, SubmitSolutionJd};
+use primitive_types::U256 as U256Primitive;
 use std::{
+    cmp::max,
     convert::{TryFrom, TryInto},
     ops::{Div, Mul},
     str::FromStr,
     sync::{Mutex as Mutex_, MutexGuard, PoisonError},
 };
-
-use binary_sv2::U256;
-use bitcoin::Block;
-use job_declaration_sv2::{DeclareMiningJob, SubmitSolutionJd};
 use stratum_common::{
     bitcoin,
     bitcoin::{
-        blockdata::block::BlockHeader,
+        blockdata::block::{Header, Version},
+        consensus,
         hash_types::{BlockHash, TxMerkleNode},
         hashes::{sha256d::Hash as DHash, Hash},
         secp256k1::{All, Secp256k1},
-        util::{
-            psbt::serialize::Deserialize,
-            uint::{Uint128, Uint256},
-            BitArray,
-        },
-        PublicKey, Script, Transaction, XOnlyPublicKey,
+        CompactTarget, PublicKey, ScriptBuf, ScriptHash, Transaction, WScriptHash, XOnlyPublicKey,
     },
 };
 use tracing::error;
 
 use crate::errors::Error;
 
-/// Generator of unique ids
+/// Generator of unique IDs for channels and groups.
+///
+/// It keeps an internal counter, which is incremented every time a new unique id is requested.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Id {
     state: u32,
 }
 
 impl Id {
+    /// Creates a new [`Id`] instance initialized to `0`.
     pub fn new() -> Self {
         Self { state: 0 }
     }
-    /// return current state and increment
+
+    /// Increments then returns the internal state on a new ID.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u32 {
         self.state += 1;
@@ -51,22 +59,37 @@ impl Default for Id {
     }
 }
 
-/// Safer Mutex wrapper
+/// Custom synchronization primitive for managing shared mutable state.
+///
+/// This custom mutex implementation builds on [`std::sync::Mutex`] to enhance usability and safety
+/// in concurrent environments. It provides ergonomic methods to safely access and modify inner
+/// values while reducing the risk of deadlocks and panics. It is used throughout SRI applications
+/// to managed shared state across multiple threads, such as tracking active mining sessions,
+/// routing jobs, and managing connections safely and efficiently.
+///
+/// ## Advantages
+/// - **Closure-Based Locking:** The `safe_lock` method encapsulates the locking process, ensuring
+///   the lock is automatically released after the closure completes.
+/// - **Error Handling:** `safe_lock` enforces explicit handling of potential [`PoisonError`]
+///   conditions, reducing the risk of panics caused by poisoned locks.
+/// - **Panic-Safe Option:** The `super_safe_lock` method provides an alternative that unwraps the
+///   result of `safe_lock`, with optional runtime safeguards against panics.
+/// - **Extensibility:** Includes feature-gated functionality to customize behavior, such as
+///   stricter runtime checks using external tools like
+///   [`no-panic`](https://github.com/dtolnay/no-panic).
 #[derive(Debug)]
 pub struct Mutex<T: ?Sized>(Mutex_<T>);
 
 impl<T> Mutex<T> {
-    /// `safe_lock` takes a closure that takes a mutable reference to the inner value, and returns a
-    /// result that either contains the return value of the closure, or a `PoisonError` that
-    /// contains a `MutexGuard` to the inner value. This is used to ensure no async executions
-    /// while locked. To prevent `PoisonLock` errors, unwraps should never be used within the
-    /// closure. Always return the result and handle outside of the safe lock.
+    /// Mutex safe lock.
     ///
-    /// Arguments:
+    /// Safely locks the `Mutex` and executes a closer (`thunk`) with a mutable reference to the
+    /// inner value. This ensures that the lock is automatically released after the closure
+    /// completes, preventing deadlocks. It explicitly returns a [`PoisonError`] containing a
+    /// [`MutexGuard`] to the inner value in cases where the lock is poisoned.
     ///
-    /// * `thunk`: A closure that takes a mutable reference to the value inside the Mutex and
-    ///   returns a
-    /// value of type Ret.
+    /// To prevent poison lock errors, unwraps should never be used within the closure. The result
+    /// should always be returned and handled outside of the sage lock.
     pub fn safe_lock<F, Ret>(&self, thunk: F) -> Result<Ret, PoisonError<MutexGuard<'_, T>>>
     where
         F: FnOnce(&mut T) -> Ret,
@@ -77,6 +100,13 @@ impl<T> Mutex<T> {
         Ok(return_value)
     }
 
+    /// Mutex super safe lock.
+    ///
+    /// Locks the `Mutex` and executes a closure (`thunk`) with a mutable reference to the inner
+    /// value, panicking if the lock is poisoned.
+    ///
+    /// This is a convenience wrapper around `safe_lock` for cases where explicit error handling is
+    /// unnecessary or undesirable. Use with caution in production code.
     pub fn super_safe_lock<F, Ret>(&self, thunk: F) -> Ret
     where
         F: FnOnce(&mut T) -> Ret,
@@ -109,32 +139,34 @@ impl<T> Mutex<T> {
         //}
     }
 
+    /// Creates a new [`Mutex`] instance, storing the initial value inside.
     pub fn new(v: T) -> Self {
         Mutex(Mutex_::new(v))
     }
 
+    /// Removes lock for direct access.
+    ///
+    /// Acquires a lock on the [`Mutex`] and returns a [`MutexGuard`] for direct access to the
+    /// inner value. Allows for manual lock handling and is useful in scenarios where closures are
+    /// not convenient.
     pub fn to_remove(&self) -> Result<MutexGuard<'_, T>, PoisonError<MutexGuard<'_, T>>> {
         self.0.lock()
     }
 }
 
-/// It takes a coinbase transaction, a list of transactions, and a list of indices, and returns the
-/// merkle root of the transactions at the given indices
+/// Computes the Merkle root from coinbase transaction components and a path of transaction hashes.
 ///
-/// Arguments:
+/// Validates and deserializes a coinbase transaction before building the 32-byte Merkle root.
+/// Returns [`None`] is the arguments are invalid.
 ///
-/// * `coinbase_tx_prefix`: the first part of the coinbase transaction, before the extranonce.
-/// This should be converted from [`binary_sv2::B064K`]
-/// * `coinbase_tx_suffix`: the coinbase transaction suffix, which is the part of the coinbase
-/// transaction after the extranonce. This should be converted from [`binary_sv2::B064K`]
-/// * `extranonce`: the extranonce that the miner is using this value should be converted from
-/// This should be converted from [`binary_sv2::B032`] and padded with zeros if not 32 bytes long
-/// * `path`: a list of transaction hashes that are used to calculate the merkle root.
-/// This should be converted from [`binary_sv2::U256`]
-///
-/// Returns:
-///
-/// A 32 byte merkle root as a vector if successful and None if the arguments are invalid.
+/// ## Components
+/// * `coinbase_tx_prefix`: First part of the coinbase transaction (the part before the extranonce).
+///   Should be converted from [`binary_sv2::B064K`].
+/// * `coinbase_tx_suffix`: Coinbase transaction suffix (the part after the extranonce). Should be
+///   converted from [`binary_sv2::B064K`].
+/// * `extranonce`: Extra nonce space. Should be converted from [`binary_sv2::B032`] and padded with
+///   zeros if not `32` bytes long.
+/// * `path`: List of transaction hashes. Should be converted from [`binary_sv2::U256`].
 pub fn merkle_root_from_path<T: AsRef<[u8]>>(
     coinbase_tx_prefix: &[u8],
     coinbase_tx_suffix: &[u8],
@@ -152,51 +184,79 @@ pub fn merkle_root_from_path<T: AsRef<[u8]>>(
     coinbase.extend_from_slice(additional_coinbase_script_data);
     coinbase.extend_from_slice(extranonce);
     coinbase.extend_from_slice(coinbase_tx_suffix);
-    let coinbase = match Transaction::deserialize(&coinbase[..]) {
+    dbg!(&coinbase.len());
+    let coinbase: Transaction = match consensus::deserialize(&coinbase[..]) {
         Ok(trans) => trans,
         Err(e) => {
             error!("ERROR: {}", e);
+            dbg!(e);
             return None;
         }
     };
 
-    let coinbase_id: [u8; 32] = match coinbase.txid().to_vec().try_into() {
-        Ok(id) => id,
-        Err(_e) => return None,
-    };
+    let coinbase_id: [u8; 32] = *coinbase.compute_txid().as_ref();
+
     Some(merkle_root_from_path_(coinbase_id, path).to_vec())
 }
 
-// TODO remove when we have https://github.com/rust-bitcoin/rust-bitcoin/issues/1319
+/// Computes the Merkle root from a validated coinbase transaction and a path of transaction
+/// hashes.
+///
+/// If the `path` is empty, the coinbase transaction hash (`coinbase_id`) is returned as the root.
+///
+/// ## Components
+/// * `coinbase_id`: Coinbase transaction hash.
+/// * `path`: List of transaction hashes. Should be converted from [`binary_sv2::U256`].
 pub fn merkle_root_from_path_<T: AsRef<[u8]>>(coinbase_id: [u8; 32], path: &[T]) -> [u8; 32] {
     match path.len() {
         0 => coinbase_id,
         _ => reduce_path(coinbase_id, path),
     }
 }
-// TODO remove when we have https://github.com/rust-bitcoin/rust-bitcoin/issues/1319
+
+// Computes the Merkle root by iteratively combining the coinbase transaction hash with each
+// transaction hash in the `path`.
+//
+// Handles the core logic of combining hashes using the Bitcoin double-SHA256 hashing algorithm.
 fn reduce_path<T: AsRef<[u8]>>(coinbase_id: [u8; 32], path: &[T]) -> [u8; 32] {
     let mut root = coinbase_id;
     for node in path {
         let to_hash = [&root[..], node.as_ref()].concat();
-        root = bitcoin::hashes::sha256d::Hash::hash(&to_hash)
-            .to_vec()
-            .try_into()
-            .unwrap();
+        let hash = DHash::hash(&to_hash);
+        root = *hash.as_ref();
     }
     root
 }
 
-//
-// Coinbase output construction utils
-//
+/// Coinbase output transaction.
+///
+/// Typically used for parsing coinbase outputs defined in SRI role configuration files.
 #[derive(Debug, Clone)]
 pub struct CoinbaseOutput {
+    /// Specifies type of the script used in the output.
+    ///
+    /// Supported values include:
+    /// - `"P2PK"`: Pay-to-Public-Key
+    /// - `"P2PKH"`: Pay-to-Public-Key-Hash
+    /// - `"P2SH"`: Pay-to-Script-Hash
+    /// - `"P2WPKH"`: Pay-to-Witness-Public-Key-Hash
+    /// - `"P2WSH"`: Pay-to-Witness-Script-Hash
+    /// - `"P2TR"`: Pay-to-Taproot
     pub output_script_type: String,
+
+    /// Value associated with the script, typically a public key or script hash.
+    ///
+    /// This field's interpretation depends on the `output_script_type`:
+    /// - For `"P2PK"`: The raw public key.
+    /// - For `"P2PKH"`: A public key hash.
+    /// - For `"P2WPKH"`: A witness public key hash.
+    /// - For `"P2SH"`: A script hash.
+    /// - For `"P2WSH"`: A witness script hash.
+    /// - For `"P2TR"`: An x-only public key.
     pub output_script_value: String,
 }
 
-impl TryFrom<CoinbaseOutput> for Script {
+impl TryFrom<CoinbaseOutput> for ScriptBuf {
     type Error = Error;
 
     fn try_from(value: CoinbaseOutput) -> Result<Self, Self::Error> {
@@ -205,37 +265,35 @@ impl TryFrom<CoinbaseOutput> for Script {
                 let pub_key_hash = PublicKey::from_str(&value.output_script_value)
                     .map_err(|_| Error::InvalidOutputScript)?
                     .pubkey_hash();
-                Ok(Script::new_p2pkh(&pub_key_hash))
+                Ok(ScriptBuf::new_p2pkh(&pub_key_hash))
             }
             "P2PK" => {
                 let pub_key = PublicKey::from_str(&value.output_script_value)
                     .map_err(|_| Error::InvalidOutputScript)?;
-                Ok(Script::new_p2pk(&pub_key))
+                Ok(ScriptBuf::new_p2pk(&pub_key))
             }
             "P2PKH" => {
                 let pub_key_hash = PublicKey::from_str(&value.output_script_value)
                     .map_err(|_| Error::InvalidOutputScript)?
                     .pubkey_hash();
-                Ok(Script::new_p2pkh(&pub_key_hash))
+                Ok(ScriptBuf::new_p2pkh(&pub_key_hash))
             }
             "P2WPKH" => {
                 let w_pub_key_hash = PublicKey::from_str(&value.output_script_value)
                     .map_err(|_| Error::InvalidOutputScript)?
                     .wpubkey_hash()
                     .unwrap();
-                Ok(Script::new_v0_p2wpkh(&w_pub_key_hash))
+                Ok(ScriptBuf::new_p2wpkh(&w_pub_key_hash))
             }
             "P2SH" => {
-                let script_hashed = Script::from_str(&value.output_script_value)
-                    .map_err(|_| Error::InvalidOutputScript)?
-                    .script_hash();
-                Ok(Script::new_p2sh(&script_hashed))
+                let script_hashed = ScriptHash::from_str(value.output_script_value.as_ref())
+                    .map_err(|_| Error::InvalidOutputScript)?;
+                Ok(ScriptBuf::new_p2sh(&script_hashed))
             }
             "P2WSH" => {
-                let w_script_hashed = Script::from_str(&value.output_script_value)
-                    .map_err(|_| Error::InvalidOutputScript)?
-                    .wscript_hash();
-                Ok(Script::new_v0_p2wsh(&w_script_hashed))
+                let w_script_hashed = WScriptHash::from_str(value.output_script_value.as_ref())
+                    .map_err(|_| Error::InvalidOutputScript)?;
+                Ok(ScriptBuf::new_p2wsh(&w_script_hashed))
             }
             "P2TR" => {
                 // From the bip
@@ -245,7 +303,7 @@ impl TryFrom<CoinbaseOutput> for Script {
                 // and zero or more general conditions encoded in scripts organized in a tree.
                 let pub_key = XOnlyPublicKey::from_str(&value.output_script_value)
                     .map_err(|_| Error::InvalidOutputScript)?;
-                Ok(Script::new_v1_p2tr::<All>(
+                Ok(ScriptBuf::new_p2tr::<All>(
                     &Secp256k1::<All>::new(),
                     pub_key,
                     None,
@@ -256,43 +314,62 @@ impl TryFrom<CoinbaseOutput> for Script {
     }
 }
 
+/// A list of potential errors during conversion between hashrate and target
 #[derive(Debug)]
 pub enum InputError {
     NegativeInput,
     DivisionByZero,
 }
 
-/// The pool set a target for each miner. Each target is calibrated on the hashrate of the miner.
-/// The following function takes as input a miner hashrate and the shares per minute requested by
-/// the pool. The output t is the target (in big endian) for the miner with that hashrate. The
-/// miner that mines with target t produces the requested number of shares per minute.
+/// Calculates the mining target threshold for a mining device based on its hashrate (H/s) and
+/// desired share frequency (shares/min).
 ///
+/// Determines the maximum hash value (target), in big endian, that a mining device can produce to
+/// find a valid share. The target is derived from the miner's hashrate and the expected number of
+/// shares per minute, aligning the miner's workload with the upstream's (e.g. pool's) share
+/// frequency requirements.
 ///
-/// If we want a speficic number of shares per minute from a miner of known hashrate,
-/// how do we set the adequate target?
+/// Typically used during connection setup to assign a starting target based on the mining device's
+/// reported hashrate and to recalculate during runtime when a mining device's hashrate changes,
+/// ensuring they submit shares at the desired rate.
 ///
-/// According to [1] and [2],  it is possible to model the probability of finding a block with
-/// a random variable X whose distribution is negtive hypergeometric [3].
-/// Such a variable is characterized as follows. Say that there are n (2^256) elements (possible
-/// hash values), of which t (values <= target) are defined as success and the remaining as
-/// failures. The variable X has codomain the positive integers, and X=k is the event where element
-/// are drawn one after the other, without replacement, and only the k-th element is successful.
-/// The expected value of this variable is (n-t)/(t+1).
-/// So, on average, a miner has to perform (2^256-t)/(t+1) hashes before finding hash whose value
-/// is below the target t. If the pool wants, on average, a share every s seconds, then, on
-/// average, the miner has to perform h*s hashes before finding one that is smaller than the
-/// target, where h is the miner's hashrate. Therefore, s*h= (2^256-t)/(t+1). If we consider h the
-/// global bitcoin's hashrate, s = 600 seconds and t the bicoin global target, then, for all the
-/// blocks we tried, the two members of the equations have the same order of magnitude and, most
-/// of the cases, they coincide with the first two digits. We take this as evidence of the
-/// correctness of our calculations. Thus, if the pool wants on average a share every s
-/// seconds from a miner with hashrate h, then the target t for the miner is t = (2^256-sh)/(sh+1).
+/// ## Formula
+/// ```text
+/// t = (2^256 - sh) / (sh + 1)
+/// ```
 ///
-/// [1] https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3399742
-/// [2] https://www.zora.uzh.ch/id/eprint/173483/1/SSRN-id3399742-2.pdf
-/// [3] https://en.wikipedia.org/wiki/Negative_hypergeometric_distribution
-/// bdiff: 0x00000000ffff0000000000000000000000000000000000000000000000000000
-/// https://en.bitcoin.it/wiki/Difficulty#How_soon_might_I_expect_to_generate_a_block.3F
+/// Where:
+/// - `h`: Mining device hashrate (H/s).
+/// - `s`: Shares per second `60 / shares/min` (s).
+/// - `sh`: `h * s`, the mining device's work over `s` seconds.
+///
+/// According to \[1] and \[2], it is possible to model the probability of finding a block with
+/// a random variable X whose distribution is negative hypergeometric \[3]. Such a variable is
+/// characterized as follows:
+///
+/// Say that there are `n` (`2^256`) elements (possible hash values), of which `t` (values <=
+/// target) are defined as success and the remaining as failures. The variable `X` has co-domain
+/// the positive integers, and `X=k` is the event where element are drawn one after the other,
+/// without replacement, and only the `k`th element is successful. The expected value of this
+/// variable is `(n-t)/(t+1)`. So, on average, a miner has to perform `(2^256-t)/(t+1)` hashes
+/// before finding hash whose value is below the target `t`.
+///
+/// If the pool wants, on average, a share every `s` seconds, then, on average, the miner has to
+/// perform `h*s` hashes before finding one that is smaller than the target, where `h` is the
+/// miner's hashrate. Therefore, `s*h= (2^256-t)/(t+1)`. If we consider `h` the global Bitcoin's
+/// hashrate, `s = 600` seconds and `t` the Bitcoin global target, then, for all the blocks we
+/// tried, the two members of the equations have the same order of magnitude and, most of the
+/// cases, they coincide with the first two digits.
+///
+/// We take this as evidence of the correctness of our calculations. Thus, if the pool wants on
+/// average a share every `s` seconds from a miner with hashrate `h`, then the target `t` for the
+/// miner is `t = (2^256-sh)/(sh+1)`.
+///
+/// \[1] [https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3399742](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3399742)
+///
+/// \[2] [https://www.zora.uzh.ch/id/eprint/173483/1/SSRN-id3399742-2.pdf](https://www.zora.uzh.ch/id/eprint/173483/1/SSRN-id3399742-2.pdf)
+///
+/// \[3] [https://en.wikipedia.org/wiki/Negative_hypergeometric_distribution](https://en.wikipedia.org/wiki/Negative_hypergeometric_distribution)
 pub fn hash_rate_to_target(
     hashrate: f64,
     share_per_min: f64,
@@ -320,28 +397,43 @@ pub fn hash_rate_to_target(
     // this means that the denominator can never be zero
     // we add 100 in place of 1 because h*s is actually h*s*100, we in order to simplify later we
     // must calculate (h*s+1)*100
-    let h_times_s_plus_one = h_times_s + 1;
+    let h_times_s_plus_one = max(h_times_s, h_times_s + 1);
 
-    let h_times_s_plus_one: Uint256 = from_u128_to_uint256(h_times_s_plus_one);
+    let h_times_s_plus_one = from_u128_to_u256(h_times_s_plus_one);
     let denominator = h_times_s_plus_one;
 
     // We calculate the numerator: 2^256-sh
     let two_to_256_minus_one = [255_u8; 32];
-    let two_to_256_minus_one = bitcoin::util::uint::Uint256::from_be_bytes(two_to_256_minus_one);
+    let two_to_256_minus_one = U256Primitive::from_big_endian(two_to_256_minus_one.as_ref());
 
     let mut h_times_s_array = [0u8; 32];
     h_times_s_array[16..].copy_from_slice(&h_times_s.to_be_bytes());
-    let numerator =
-        two_to_256_minus_one - bitcoin::util::uint::Uint256::from_be_bytes(h_times_s_array);
+    let numerator = two_to_256_minus_one - U256Primitive::from_big_endian(h_times_s_array.as_ref());
 
-    let mut target = numerator.div(denominator).to_be_bytes();
+    let mut target = numerator.div(denominator).to_big_endian();
     target.reverse();
     Ok(U256::<'static>::from(target))
 }
 
-/// this function utilizes the equation used in [`hash_rate_to_target`], but
-/// translated to solve for hash_rate given a target: h = (2^256-t)/s(t+1)
-/// where s is seconds_between_two_consecutive_shares and t is target
+/// Calculates the hashrate (H/s) required to produce a specific number of shares per minute for a
+/// given mining target (big endian).
+///
+/// It is the inverse of [`hash_rate_to_target`], enabling backward calculations to estimate a
+/// mining device's performance from its submitted shares.
+///
+/// Typically used to calculate the mining device's effective hashrate during runtime based on the
+/// submitted shares and the assigned target, also helps detect changes in miner performance and
+/// recalibrate the target (using [`hash_rate_to_target`]) if necessary.
+///
+/// ## Formula
+/// ```text
+/// h = (2^256 - t) / (s * (t + 1))
+/// ```
+///
+/// Where:
+/// - `h`: Mining device hashrate (H/s).
+/// - `t`: Target threshold.
+/// - `s`: Shares per minute.
 pub fn hash_rate_from_target(target: U256<'static>, share_per_min: f64) -> Result<f64, Error> {
     // checks that we are not dividing by zero
     if share_per_min == 0.0 {
@@ -352,17 +444,18 @@ pub fn hash_rate_from_target(target: U256<'static>, share_per_min: f64) -> Resul
     }
 
     let mut target_arr: [u8; 32] = [0; 32];
-    target_arr.as_mut().copy_from_slice(target.inner_as_ref());
+    let slice: &mut [u8] = &mut target_arr;
+    slice.copy_from_slice(target.inner_as_ref());
     target_arr.reverse();
-    let target = Uint256::from_be_bytes(target_arr);
+    let target = U256Primitive::from_big_endian(target_arr.as_ref());
 
     // we calculate the numerator 2^256-t
     // note that [255_u8,;32] actually is 2^256 -1, but 2^256 -t = (2^256-1) - (t-1)
     let max_target = [255_u8; 32];
-    let max_target = Uint256::from_be_bytes(max_target);
-    let numerator = max_target - (target - Uint256::one());
+    let max_target = U256Primitive::from_big_endian(max_target.as_ref());
+    let numerator = max_target - (target - U256Primitive::one());
 
-    // now we calcualte the denominator s(t+1)
+    // now we calculate the denominator s(t+1)
     // *100 here to move the fractional bit up so we can make this an int later
     let shares_occurrency_frequence = 60_f64 / (share_per_min) * 100.0;
     // note that t+1 cannot be zero because t unsigned. Therefore the denominator is zero if and
@@ -371,33 +464,44 @@ pub fn hash_rate_from_target(target: U256<'static>, share_per_min: f64) -> Resul
     if shares_occurrency_frequence == 0_u128 {
         return Err(Error::HashrateError(InputError::DivisionByZero));
     }
-    let shares_occurrency_frequence = u128_as_u256(shares_occurrency_frequence);
-    let mut target_plus_one = Uint256::from_be_bytes(target_arr);
-    target_plus_one.increment();
+    let shares_occurrency_frequence = from_u128_to_u256(shares_occurrency_frequence);
+    let target_plus_one =
+        U256Primitive::from_big_endian(target_arr.as_ref()) + U256Primitive::one();
     let denominator = shares_occurrency_frequence
         .mul(target_plus_one)
-        .div(Uint256::from_u64(100).unwrap());
-
-    let result = from_uint128_to_u128(numerator.div(denominator).low_128());
+        .div(U256Primitive::from(100));
+    let result = numerator.div(denominator).low_u128();
     // we multiply back by 100 so that it cancels with the same factor at the denominator
     Ok(result as f64)
 }
 
-fn from_uint128_to_u128(input: Uint128) -> u128 {
-    let input = input.to_be_bytes();
-    u128::from_be_bytes(input)
-}
-
-pub fn from_u128_to_uint256(input: u128) -> Uint256 {
+/// Converts a `u128` to a [`U256`].
+pub fn from_u128_to_u256(input: u128) -> U256Primitive {
     let input: [u8; 16] = input.to_be_bytes();
     let mut be_bytes = [0_u8; 32];
     for (i, b) in input.iter().enumerate() {
         be_bytes[16 + i] = *b;
     }
-    Uint256::from_be_bytes(be_bytes)
+    U256Primitive::from_big_endian(be_bytes.as_ref())
 }
 
-/// Used to package multiple SV2 channels into a single group.
+/// Generates and manages unique IDs for groups and channels.
+///
+/// [`GroupId`] allows combining the group and channel [`Id`]s into a single 64-bit value, enabling
+/// efficient tracking and referencing of group-channel relationships.
+///
+/// This is specifically used for packaging multiple channels into a single group, such that
+/// multiple mining or communication channels can be managed as a cohesive unit. This is
+/// particularly useful in scenarios where multiple downstreams share common properties or need to
+/// be treated collectively for routing or load balancing.
+///
+/// A group acts as a container for multiple channels. Each channel represents a distinct
+/// communication pathway between a downstream (e.g. a mining device) and an upstream (e.g. a proxy
+/// or pool). Channels within a group might share common configurations, such as difficulty
+/// settings or work templates. Operations like broadcasting job updates or handling difficulty
+/// adjustments can be efficiently applied to all channels in a group. By treating a group as a
+/// single entity, the protocol reduces overhead of managing individual channels, especially in
+/// large mining farms.
 #[derive(Debug, Default)]
 pub struct GroupId {
     group_ids: Id,
@@ -405,7 +509,9 @@ pub struct GroupId {
 }
 
 impl GroupId {
-    /// New GroupId it starts with groups 0, since 0 is reserved for hom downstreams
+    /// Creates a new [`GroupId`] instance.
+    ///
+    /// New GroupId it starts with groups 0, since 0 is reserved for hom downstream's.
     pub fn new() -> Self {
         Self {
             group_ids: Id::new(),
@@ -413,19 +519,28 @@ impl GroupId {
         }
     }
 
-    /// Create a group and return the id
+    /// Generates a new unique group ID.
+    ///
+    /// Increments the internal group ID counter and returns the next available group ID.
     pub fn new_group_id(&mut self) -> u32 {
         self.group_ids.next()
     }
 
-    /// Create a channel for a paricular group and return the channel id
-    /// _group_id is left for a future use of this API where we have an hirearchy of ids so that we
-    /// don't break old versions
+    /// Generates a new unique channel ID for a given group.
+    ///
+    /// Increments the internal channel ID counter and returns the next available channel ID.
+    ///
+    /// **Note**: The `_group_id` parameter is reserved for future use to create a hierarchical
+    /// structure of IDs without breaking compatibility with older versions.
     pub fn new_channel_id(&mut self, _group_id: u32) -> u32 {
         self.channel_ids.next()
     }
 
-    /// Concatenate a group and a channel id into a complete id
+    /// Combines a group ID and channel ID into a single 64-bit unique ID.
+    ///
+    /// Concatenates the group ID and channel ID, storing the group ID in the higher 32 bits and
+    /// the channel ID in the lower 32 bits. This combined identifier is useful for efficiently
+    /// tracking and referencing unique group-channel pairs.
     pub fn into_complete_id(group_id: u32, channel_id: u32) -> u64 {
         let part_1 = channel_id.to_le_bytes();
         let part_2 = group_id.to_le_bytes();
@@ -434,13 +549,17 @@ impl GroupId {
         ])
     }
 
-    /// Get the group part from a complete id
+    /// Extracts the group ID from a complete group-channel 64-bit unique ID.
+    ///
+    /// The group ID is the higher 32 bits.
     pub fn into_group_id(complete_id: u64) -> u32 {
         let complete = complete_id.to_le_bytes();
         u32::from_le_bytes([complete[4], complete[5], complete[6], complete[7]])
     }
 
-    /// Get the channel part from a complete id
+    /// Extracts the channel ID from a complete group-channel 64-bit unique ID.
+    ///
+    /// The channel ID is the lower 32 bits.
     pub fn into_channel_id(complete_id: u64) -> u32 {
         let complete = complete_id.to_le_bytes();
         u32::from_le_bytes([complete[0], complete[1], complete[2], complete[3]])
@@ -477,6 +596,84 @@ fn test_group_id_new_into_group_id() {
     let complete_id = GroupId::into_complete_id(group_id, channel_id);
     let channel_from_complete = GroupId::into_channel_id(complete_id);
     assert!(channel_id == channel_from_complete);
+}
+
+#[test]
+fn test_merkle_root_independent_vector() {
+    const REFERENCE_MERKLE_ROOT: [u8; 32] = [
+        28, 204, 213, 73, 250, 160, 146, 15, 5, 127, 9, 214, 204, 20, 164, 199, 20, 181, 26, 190,
+        236, 91, 40, 225, 128, 239, 213, 148, 232, 77, 4, 36,
+    ];
+    const BRANCH: &[[u8; 32]] = &[
+        [
+            224, 195, 140, 86, 17, 172, 9, 61, 54, 73, 215, 202, 109, 83, 124, 163, 215, 78, 143,
+            204, 44, 242, 242, 122, 37, 106, 55, 81, 58, 234, 27, 210,
+        ],
+        [
+            35, 10, 232, 246, 235, 117, 56, 190, 87, 77, 81, 11, 159, 79, 90, 62, 91, 52, 41, 49,
+            57, 245, 219, 122, 115, 223, 199, 229, 238, 60, 47, 144,
+        ],
+        [
+            95, 18, 132, 87, 213, 76, 188, 74, 245, 106, 18, 149, 106, 32, 209, 158, 239, 3, 17,
+            26, 207, 230, 118, 149, 120, 48, 96, 66, 214, 150, 137, 220,
+        ],
+        [
+            205, 167, 106, 179, 82, 50, 157, 76, 91, 36, 54, 226, 34, 183, 162, 179, 109, 64, 185,
+            207, 103, 192, 63, 31, 141, 126, 34, 30, 68, 69, 154, 176,
+        ],
+        [
+            251, 236, 76, 1, 218, 98, 98, 236, 144, 52, 151, 246, 95, 13, 109, 240, 240, 195, 64,
+            157, 7, 142, 28, 242, 29, 123, 51, 93, 51, 36, 143, 148,
+        ],
+        [
+            35, 146, 105, 130, 188, 39, 97, 252, 75, 229, 185, 148, 242, 106, 164, 112, 123, 66,
+            34, 95, 218, 203, 50, 203, 129, 208, 109, 220, 112, 228, 121, 160,
+        ],
+        [
+            44, 55, 125, 47, 249, 213, 175, 143, 140, 50, 219, 72, 111, 71, 125, 54, 85, 70, 4, 85,
+            60, 92, 208, 35, 113, 245, 128, 139, 228, 4, 230, 177,
+        ],
+        [
+            169, 119, 48, 178, 205, 188, 19, 220, 85, 29, 174, 45, 158, 172, 222, 238, 170, 144,
+            79, 140, 56, 90, 105, 187, 204, 145, 241, 96, 75, 88, 6, 133,
+        ],
+        [
+            72, 202, 11, 90, 167, 140, 253, 12, 58, 85, 223, 17, 82, 112, 24, 129, 186, 39, 224,
+            171, 227, 192, 14, 167, 154, 248, 150, 55, 114, 169, 43, 17,
+        ],
+    ];
+    const CB_PREFIX: &[u8] = &[
+        1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 75, 3, 139, 133, 11, 250, 190, 109, 109, 43, 220,
+        215, 96, 154, 211, 18, 14, 53, 53, 0, 95, 132, 159, 127, 54, 197, 70, 135, 74, 17, 149, 12,
+        104, 133, 16, 182, 152, 109, 207, 13, 9, 1, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    const CB_SUFFIX: &[u8] = &[
+        89, 236, 29, 54, 20, 47, 115, 108, 117, 115, 104, 47, 0, 0, 0, 0, 3, 236, 42, 86, 37, 0, 0,
+        0, 0, 25, 118, 169, 20, 124, 21, 78, 209, 220, 89, 96, 158, 61, 38, 171, 178, 223, 46, 163,
+        213, 135, 205, 140, 65, 136, 172, 0, 0, 0, 0, 0, 0, 0, 0, 44, 106, 76, 41, 82, 83, 75, 66,
+        76, 79, 67, 75, 58, 155, 83, 3, 23, 69, 4, 30, 18, 212, 34, 33, 76, 167, 101, 132, 91, 1,
+        127, 124, 85, 238, 57, 118, 135, 107, 35, 25, 33, 0, 71, 6, 88, 0, 0, 0, 0, 0, 0, 0, 0, 38,
+        106, 36, 170, 33, 169, 237, 123, 170, 130, 253, 191, 130, 150, 16, 0, 18, 157, 2, 231, 33,
+        177, 230, 137, 182, 134, 51, 32, 216, 181, 6, 73, 60, 103, 211, 194, 61, 77, 64, 0, 0, 0,
+        0,
+    ];
+    const EXTRANONCE_PREFIX: &[u8] = &[41, 101, 8, 3, 39, 21, 251];
+    const EXTRANONCE: &[u8] = &[165, 6, 238, 7, 139, 252, 22, 7];
+
+    let full_extranonce = {
+        let mut xn = EXTRANONCE_PREFIX.to_vec();
+        xn.extend_from_slice(EXTRANONCE);
+        xn
+    };
+
+    let calculated_merkle_root =
+        merkle_root_from_path(CB_PREFIX, CB_SUFFIX, &full_extranonce, BRANCH, &[])
+            .expect("Ultimate failure. Merkle root calculator returned None");
+    assert_eq!(
+        calculated_merkle_root, REFERENCE_MERKLE_ROOT,
+        "Merkle root does not match reference"
+    )
 }
 
 #[test]
@@ -588,20 +785,22 @@ fn test_merkle_root_from_path() {
     );
 }
 
+/// Converts a `u256` to a [`BlockHash`] type.
 pub fn u256_to_block_hash(v: U256<'static>) -> BlockHash {
     let hash: [u8; 32] = v.to_vec().try_into().unwrap();
-    let hash = Hash::from_inner(hash);
-    BlockHash::from_hash(hash)
+    let hash = Hash::from_slice(&hash).unwrap();
+    BlockHash::from_raw_hash(hash)
 }
 
-/// Returns a new `BlockHeader`.
-/// Expected endianness inputs:
-/// version     LE
-/// prev_hash   BE
-/// merkle_root BE
-/// time        BE
-/// bits        BE
-/// nonce       BE
+// Returns a new `Header`.
+//
+// Expected endianness inputs:
+// `version`     LE
+// `prev_hash`   BE
+// `merkle_root` BE
+// `time`        BE
+// `bits`        BE
+// `nonce`       BE
 #[allow(dead_code)]
 pub(crate) fn new_header(
     version: i32,
@@ -610,7 +809,7 @@ pub(crate) fn new_header(
     time: u32,
     bits: u32,
     nonce: u32,
-) -> Result<BlockHeader, Error> {
+) -> Result<Header, Error> {
     if prev_hash.len() != 32 {
         return Err(Error::ExpectedLen32(prev_hash.len()));
     }
@@ -619,105 +818,39 @@ pub(crate) fn new_header(
     }
     let mut prev_hash_arr = [0u8; 32];
     prev_hash_arr.copy_from_slice(prev_hash);
-    let prev_hash = DHash::from_inner(prev_hash_arr);
+    let prev_hash = DHash::from_bytes_ref(&prev_hash_arr);
 
     let mut merkle_root_arr = [0u8; 32];
     merkle_root_arr.copy_from_slice(merkle_root);
-    let merkle_root = DHash::from_inner(merkle_root_arr);
+    let merkle_root = DHash::from_bytes_ref(&merkle_root_arr);
 
-    Ok(BlockHeader {
-        version,
-        prev_blockhash: BlockHash::from_hash(prev_hash),
-        merkle_root: TxMerkleNode::from_hash(merkle_root),
+    Ok(Header {
+        version: Version::from_consensus(version),
+        prev_blockhash: BlockHash::from_raw_hash(*prev_hash),
+        merkle_root: TxMerkleNode::from_raw_hash(*merkle_root),
         time,
-        bits,
+        bits: CompactTarget::from_consensus(bits),
         nonce,
     })
 }
 
-/// Returns hash of the `BlockHeader`.
-/// Endianness reference for the correct hash:
-/// version     LE
-/// prev_hash   BE
-/// merkle_root BE
-/// time        BE
-/// bits        BE
-/// nonce       BE
-#[allow(dead_code)]
-pub(crate) fn new_header_hash<'decoder>(header: BlockHeader) -> U256<'decoder> {
-    let hash = header.block_hash().to_vec();
-    // below never panic an header hash is always U256
-    hash.try_into().unwrap()
-}
-
-fn u128_as_u256(v: u128) -> Uint256 {
-    let u128_min = [0_u8; 16];
-    let u128_b = v.to_be_bytes();
-    let u256 = [&u128_min[..], &u128_b[..]].concat();
-    // below never panic
-    Uint256::from_be_slice(&u256).unwrap()
-}
-
-/// target = u256_max * (shar_per_min / 60) * (2^32 / hash_per_second)
-/// target = u128_max * ((shar_per_min / 60) * (2^32 / hash_per_second) * u128_max)
-pub fn target_from_hash_rate(hash_per_second: f32, share_per_min: f32) -> U256<'static> {
-    assert!(hash_per_second >= 1000000000.0);
-    let operand = (share_per_min as f64 / 60.0) * (u32::MAX as f64 / hash_per_second as f64);
-    assert!(operand <= 1.0);
-    let operand = operand * (u128::MAX as f64);
-    let target = u128_as_u256(u128::MAX) * u128_as_u256(operand as u128);
-    let mut target: [u8; 32] = target.to_be_bytes();
-    target.reverse();
-    target.into()
-}
-
-#[cfg_attr(feature = "cargo-clippy", allow(clippy::too_many_arguments))]
-pub fn get_target(
-    nonce: u32,
-    version: u32,
-    ntime: u32,
-    extranonce: &[u8],
-    coinbase_tx_prefix: &[u8],
-    coinbase_tx_suffix: &[u8],
-    prev_hash: BlockHash,
-    merkle_path: Vec<Vec<u8>>,
-    nbits: u32,
-) -> [u8; 32] {
-    let merkle_root: [u8; 32] = merkle_root_from_path(
-        coinbase_tx_prefix,
-        coinbase_tx_suffix,
-        extranonce,
-        &(merkle_path[..]),
-        &[],
-    )
-    .unwrap()
-    .try_into()
-    .unwrap();
-    let merkle_root = Hash::from_inner(merkle_root);
-    let merkle_root = TxMerkleNode::from_hash(merkle_root);
-    // TODO  how should version be transoformed from u32 into i32???
-    let version = version as i32;
-    let header = BlockHeader {
-        version,
-        prev_blockhash: prev_hash,
-        merkle_root,
-        time: ntime,
-        bits: nbits,
-        nonce,
-    };
-
-    let hash_ = header.block_hash();
-    let mut hash = hash_.as_hash().into_inner();
-    hash.reverse();
-    hash
-}
-
+/// Creates a block from a solution submission.
+///
+/// Facilitates the creation of valid Bitcoin blocks by combining a declared mining job, a list of
+/// transactions, and a solution message from the mining device. It encapsulates the necessary data
+/// (the coinbase, a list of transactions, and a miner-provided solution) to assemble a complete
+/// and valid block that can be submitted to the Bitcoin network.
+///
+/// It is used in the Job Declarator server to handle the final step in processing the mining job
+/// solutions.
 pub struct BlockCreator<'a> {
     last_declare: DeclareMiningJob<'a>,
     tx_list: Vec<bitcoin::Transaction>,
     message: SubmitSolutionJd<'a>,
 }
+
 impl<'a> BlockCreator<'a> {
+    /// Creates a new [`BlockCreator`] instance.
     pub fn new(
         last_declare: DeclareMiningJob<'a>,
         tx_list: Vec<bitcoin::Transaction>,
@@ -731,9 +864,9 @@ impl<'a> BlockCreator<'a> {
     }
 }
 
-/// TODO write a test for this function that takes an already mined block, and test if the new
-/// block created with the hash of the new block created with the block creator coincides with the
-/// hash of the mined block
+// TODO write a test for this function that takes an already mined block, and test if the new
+// block created with the hash of the new block created with the block creator coincides with the
+// hash of the mined block
 impl<'a> From<BlockCreator<'a>> for bitcoin::Block {
     fn from(block_creator: BlockCreator<'a>) -> bitcoin::Block {
         let last_declare = block_creator.last_declare;
@@ -745,9 +878,9 @@ impl<'a> From<BlockCreator<'a>> for bitcoin::Block {
         let coinbase_suf = last_declare.coinbase_suffix.to_vec();
         let mut path: Vec<Vec<u8>> = vec![];
         for tx in &tx_list {
-            let id = tx.txid();
-            let id = id.as_ref().to_vec();
-            path.push(id);
+            let id = tx.compute_txid();
+            let id_bytes: &[u8; 32] = id.as_ref();
+            path.push(id_bytes.to_vec());
         }
         let merkle_root = merkle_root_from_path(
             &coinbase_pre[..],
@@ -757,20 +890,20 @@ impl<'a> From<BlockCreator<'a>> for bitcoin::Block {
             &[],
         )
         .expect("Invalid coinbase");
-        let merkle_root = Hash::from_inner(merkle_root.try_into().unwrap());
+        let merkle_root = Hash::from_slice(merkle_root.as_slice()).unwrap();
 
         let prev_blockhash = u256_to_block_hash(message.prev_hash.into_static());
-        let header = stratum_common::bitcoin::blockdata::block::BlockHeader {
-            version: message.version as i32,
+        let header = Header {
+            version: Version::from_consensus(message.version as i32),
             prev_blockhash,
             merkle_root,
             time: message.ntime,
-            bits: message.nbits,
+            bits: CompactTarget::from_consensus(message.nbits),
             nonce: message.nonce,
         };
 
         let coinbase = [coinbase_pre, extranonce, coinbase_suf].concat();
-        let coinbase = Transaction::deserialize(&coinbase[..]).unwrap();
+        let coinbase = consensus::deserialize(&coinbase[..]).unwrap();
         tx_list.insert(0, coinbase);
 
         let mut block = Block {
@@ -785,23 +918,13 @@ impl<'a> From<BlockCreator<'a>> for bitcoin::Block {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "serde")]
-    use super::*;
-    use super::{hash_rate_from_target, hash_rate_to_target};
-    #[cfg(feature = "serde")]
+
+    use super::{hash_rate_from_target, hash_rate_to_target, *};
     use binary_sv2::{Seq0255, B064K, U256};
     use rand::Rng;
-    #[cfg(feature = "serde")]
     use serde::Deserialize;
+    use std::{convert::TryInto, num::ParseIntError};
 
-    #[cfg(feature = "serde")]
-    use std::convert::TryInto;
-    #[cfg(feature = "serde")]
-    use std::num::ParseIntError;
-
-    use stratum_common::bitcoin;
-
-    #[cfg(feature = "serde")]
     fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
         (0..s.len())
             .step_by(2)
@@ -809,7 +932,6 @@ mod tests {
             .collect()
     }
 
-    #[cfg(feature = "serde")]
     #[derive(Debug, Deserialize)]
     struct TestBlockToml {
         block_hash: String,
@@ -825,9 +947,9 @@ mod tests {
         path: Vec<String>,
     }
 
-    #[cfg(feature = "serde")]
     #[derive(Debug)]
     struct TestBlock<'decoder> {
+        #[allow(dead_code)]
         block_hash: U256<'decoder>,
         version: u32,
         prev_hash: Vec<u8>,
@@ -840,9 +962,9 @@ mod tests {
         coinbase_tx_suffix: B064K<'decoder>,
         path: Seq0255<'decoder, U256<'decoder>>,
     }
-    #[cfg(feature = "serde")]
+
     fn get_test_block<'decoder>() -> TestBlock<'decoder> {
-        let test_file = std::fs::read_to_string("../../../test_data/reg-test-block.toml")
+        let test_file = std::fs::read_to_string("reg-test-block.toml")
             .expect("Could not read file from string");
         let block: TestBlockToml =
             toml::from_str(&test_file).expect("Could not parse toml file as `TestBlockToml`");
@@ -913,23 +1035,26 @@ mod tests {
             path,
         }
     }
+
     #[test]
-    #[cfg(feature = "serde")]
     fn gets_merkle_root_from_path() {
         let block = get_test_block();
         let expect: Vec<u8> = block.merkle_root;
 
         let actual = merkle_root_from_path(
             block.coinbase_tx_prefix.inner_as_ref(),
+            &block.coinbase_tx_suffix.inner_as_ref(),
             &block.coinbase_script,
-            block.coinbase_tx_suffix.inner_as_ref(),
             &block.path.inner_as_ref(),
-        );
+            &[],
+        )
+        .unwrap();
+
         assert_eq!(expect, actual);
     }
 
     #[test]
-    #[cfg(feature = "serde")]
+
     fn gets_new_header() -> Result<(), Error> {
         let block = get_test_block();
 
@@ -941,18 +1066,18 @@ mod tests {
         }
         let mut prev_hash_arr = [0u8; 32];
         prev_hash_arr.copy_from_slice(&block.prev_hash);
-        let prev_hash = DHash::from_inner(prev_hash_arr);
+        let prev_hash = DHash::from_bytes_ref(&prev_hash_arr);
 
         let mut merkle_root_arr = [0u8; 32];
         merkle_root_arr.copy_from_slice(&block.merkle_root);
-        let merkle_root = DHash::from_inner(merkle_root_arr);
+        let merkle_root = DHash::from_bytes_ref(&merkle_root_arr);
 
-        let expect = BlockHeader {
-            version: block.version as i32,
-            prev_blockhash: BlockHash::from_hash(prev_hash),
-            merkle_root: TxMerkleNode::from_hash(merkle_root),
+        let expect = Header {
+            version: Version::from_consensus(block.version as i32),
+            prev_blockhash: BlockHash::from_raw_hash(*prev_hash),
+            merkle_root: TxMerkleNode::from_raw_hash(*merkle_root),
             time: block.time,
-            bits: block.nbits,
+            bits: CompactTarget::from_consensus(block.nbits),
             nonce: block.nonce,
         };
 
@@ -970,30 +1095,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "serde")]
-    fn gets_new_header_hash() {
-        let block = get_test_block();
-        let expect = block.block_hash;
-        let block = get_test_block();
-        let prev_hash: [u8; 32] = block.prev_hash.to_vec().try_into().unwrap();
-        let prev_hash = DHash::from_inner(prev_hash);
-        let merkle_root: [u8; 32] = block.merkle_root.to_vec().try_into().unwrap();
-        let merkle_root = DHash::from_inner(merkle_root);
-        let header = BlockHeader {
-            version: block.version as i32,
-            prev_blockhash: BlockHash::from_hash(prev_hash),
-            merkle_root: TxMerkleNode::from_hash(merkle_root),
-            time: block.time,
-            bits: block.nbits,
-            nonce: block.nonce,
-        };
-
-        let actual = new_header_hash(header);
-
-        assert_eq!(actual, expect);
-    }
-
-    #[test]
     fn test_hash_rate_to_target() {
         let mut rng = rand::thread_rng();
         let mut successes = 0;
@@ -1002,7 +1103,7 @@ mod tests {
         let hrs = hr * 60.0; // number of hashes in 1 minute
         let mut target = hash_rate_to_target(hr, 1.0).unwrap().to_vec();
         target.reverse();
-        let target = bitcoin::util::uint::Uint256::from_be_slice(&target[..]).unwrap();
+        let target = U256Primitive::from_big_endian(&target[..]);
 
         let mut i: i64 = 0;
         let mut results = vec![];
@@ -1014,7 +1115,7 @@ mod tests {
             let b = b.to_be_bytes();
             let concat = [&a[..], &b[..]].concat().to_vec();
             i += 1;
-            if bitcoin::util::uint::Uint256::from_be_slice(&concat[..]).unwrap() <= target {
+            if U256Primitive::from_big_endian(&concat[..]) <= target {
                 results.push(i);
                 i = 0;
                 successes += 1;

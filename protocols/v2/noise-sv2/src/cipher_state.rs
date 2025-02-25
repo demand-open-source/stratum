@@ -33,7 +33,7 @@
 // within the Noise protocol, ensuring secure data handling, key management, and nonce tracking
 // throughout the communication session.
 
-use std::ptr;
+use core::ptr;
 
 use crate::aed_cipher::AeadCipher;
 use aes_gcm::Aes256Gcm;
@@ -93,6 +93,22 @@ where
         let len = res.len();
         res[4..].copy_from_slice(&bytes[..(len - 4)]);
         res
+    }
+
+    #[allow(dead_code)]
+    fn into_aesg(mut self) -> Option<Cipher<Aes256Gcm>> {
+        #[allow(clippy::clone_on_copy)]
+        let k = self.get_k().clone()?;
+        let c = Aes256Gcm::from_key(k);
+        Some(Cipher::from_cipher(c))
+    }
+
+    #[allow(dead_code)]
+    fn into_chacha(mut self) -> Option<Cipher<ChaCha20Poly1305>> {
+        #[allow(clippy::clone_on_copy)]
+        let k = self.get_k().clone()?;
+        let c = ChaCha20Poly1305::from_key(k);
+        Some(Cipher::from_cipher(c))
     }
 
     // Encrypts the provided `data` in place using the cipher and AAD (`ad`).
