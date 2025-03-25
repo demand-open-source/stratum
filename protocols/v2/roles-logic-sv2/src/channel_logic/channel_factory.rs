@@ -1672,6 +1672,14 @@ impl PoolChannelFactory {
     pub fn get_extranonce_len(&self) -> usize {
         self.inner.extranonces.get_len()
     }
+
+    pub fn get_extranonce_prefix(&self, channel_id: u32) -> Option<Vec<u8>> {
+        let channel = self
+            .inner
+            .extended_channels
+            .get(&channel_id)?;
+        Some(channel.extranonce_prefix.to_vec())
+    }
 }
 
 /// Used by proxies that want to open extended channels with upstream. If the proxy has job
