@@ -1582,7 +1582,7 @@ impl PoolChannelFactory {
 
     // TODO ret can not be larger then 32 bytes maybe use the stack for it?
     #[inline(always)]
-    fn get_additional_coinbase_script_data(&self, channel_id: u32, job_id: u32) -> Vec<u8> {
+    pub fn get_additional_coinbase_script_data(&self, channel_id: u32, job_id: u32) -> Vec<u8> {
         debug_assert!({
             let have_old = self.job_ids_using_old_add_data.contains(&job_id);
             let not_have_old = self
