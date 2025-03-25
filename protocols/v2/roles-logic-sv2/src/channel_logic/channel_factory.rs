@@ -1668,6 +1668,10 @@ impl PoolChannelFactory {
             .retain(|k, _| k != &channel_id);
         self.inner.close_channel(channel_id);
     }
+
+    pub fn get_extranonce_len(&self) -> usize {
+        self.inner.extranonces.get_len()
+    }
 }
 
 /// Used by proxies that want to open extended channels with upstream. If the proxy has job
