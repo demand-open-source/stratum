@@ -1337,7 +1337,9 @@ impl PoolChannelFactory {
         m: SubmitSharesStandard,
     ) -> Result<OnNewShare, Error> {
         let additional_coinbase_script_data =
-            self.get_additional_coinbase_script_data(m.channel_id, m.job_id);
+            self.get_additional_coinbase_script_data(m.channel_id, m.job_id).ok_or(
+                Error::ShareDoNotMatchAnyJob
+            )?;
         match self.inner.channel_to_group_id.get(&m.channel_id) {
             Some(g_id) => {
                 let referenced_job = self
@@ -1399,7 +1401,9 @@ impl PoolChannelFactory {
     ) -> Result<OnNewShare, Error> {
         let target = self.job_creator.last_target();
         let additional_coinbase_script_data =
-            self.get_additional_coinbase_script_data(m.channel_id, m.job_id);
+            self.get_additional_coinbase_script_data(m.channel_id, m.job_id).ok_or(
+                Error::ShareDoNotMatchAnyJob
+            )?;
         // When downstream set a custom mining job we add the job to the negotiated job
         // hashmap, with the extended channel id as a key. Whenever the pool receive a share must
         // first check if the channel have a negotiated job if so we can not retrieve the template
@@ -1582,7 +1586,7 @@ impl PoolChannelFactory {
 
     // TODO ret can not be larger then 32 bytes maybe use the stack for it?
     #[inline(always)]
-    pub fn get_additional_coinbase_script_data(&self, channel_id: u32, job_id: u32) -> Vec<u8> {
+    pub fn get_additional_coinbase_script_data(&self, channel_id: u32, job_id: u32) -> Option<Vec<u8>> {
         debug_assert!({
             let have_old = self.job_ids_using_old_add_data.contains(&job_id);
             let not_have_old = self
@@ -1601,15 +1605,15 @@ impl PoolChannelFactory {
             .channel_to_additional_coinbase_script_data
             .get(&channel_id)
         {
-            Some((add_data, None)) => add_data.clone(),
+            Some((add_data, None)) => Some(add_data.clone()),
             Some((add_data, Some(old_data))) => {
                 if self.job_ids_using_old_add_data.contains(&job_id) {
-                    old_data.clone()
+                    Some(old_data.clone())
                 } else {
-                    add_data.clone()
+                    Some(add_data.clone())
                 }
             }
-            None => panic!("Internal error: channel not initialized can not get additional data"),
+            None => None
         }
     }
 
