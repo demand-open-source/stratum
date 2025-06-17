@@ -2112,6 +2112,13 @@ impl ProxyExtendedChannelFactory {
             .map(|j| j.0.version)
     }
 
+   /// Return a mining job by its `job_id`.
+    /// This can be `None` if we try to fetch a stale job because we clean up the valid jobs array
+    /// upon receiving a new `PrevHash`
+    pub fn job(&self, job_id: u32) -> Option<&(NewExtendedMiningJob<'static>, Vec<u32>)> {
+        self.inner.get_valid_job(job_id)
+    }
+
     /// Returns the full extranonce, extranonce1 (static for channel) + extranonce2 (miner nonce
     /// space)
     pub fn extranonce_from_downstream_extranonce(
