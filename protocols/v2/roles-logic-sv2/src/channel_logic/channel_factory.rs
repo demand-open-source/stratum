@@ -1009,7 +1009,7 @@ impl ChannelFactory {
                 print_hash.to_vec().as_hex()
             );
 
-            let coinbase = [coinbase_tx_prefix, &extranonce[..], coinbase_tx_suffix]
+            let coinbase = [coinbase_tx_prefix, additional_coinbase_script_data.unwrap_or(&[]),&extranonce[..], coinbase_tx_suffix]
                 .concat()
                 .to_vec();
             match self.kind {
