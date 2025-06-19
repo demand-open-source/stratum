@@ -125,7 +125,7 @@ pub enum Method<'a> {
 
 #[derive(Debug, Clone)]
 pub enum Client2Server<'a> {
-    SuggestDifficulty(),
+    SuggestDifficulty(client_to_server::SuggestDifficulty),
     Subscribe(client_to_server::Subscribe<'a>),
     Authorize(client_to_server::Authorize),
     ExtranonceSubscribe(client_to_server::ExtranonceSubscribe),
@@ -218,7 +218,13 @@ impl<'a> TryFrom<Message> for Method<'a> {
         match &msg {
             Message::StandardRequest(request) => match &request.method[..] {
                 "mining.suggest_difficulty" => {
-                    Ok(Method::Client2Server(Client2Server::SuggestDifficulty()))
+                    let method = request
+                        .clone()
+                        .try_into()
+                        .map_err(|e: ParsingMethodError| e.as_method_error(msg))?;
+                    Ok(Method::Client2Server(Client2Server::SuggestDifficulty(
+                        method,
+                    )))
                 }
                 "mining.subscribe" => {
                     let method = request
