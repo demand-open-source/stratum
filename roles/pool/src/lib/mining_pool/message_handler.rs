@@ -21,14 +21,6 @@ impl ParseDownstreamMiningMessages<(), NullDownstreamMiningSelector, NoRouting> 
         true
     }
 
-    #[cfg(feature = "MG_reject_auth")]
-    fn is_downstream_authorized(
-        _self_mutex: Arc<Mutex<Self>>,
-        _user_identity: &binary_sv2::Str0255,
-    ) -> Result<bool, Error> {
-        Ok(false)
-    }
-
     fn handle_open_standard_mining_channel(
         &mut self,
         incoming: OpenStandardMiningChannel,
@@ -144,7 +136,10 @@ impl ParseDownstreamMiningMessages<(), NullDownstreamMiningSelector, NoRouting> 
                     Ok(SendTo::Respond(Mining::SubmitSharesSuccess(success)))
                 },
             },
-            Err(_) => todo!(),
+            Err(e) => {
+                dbg!(e);
+                panic!("Internal Error: unexpected message from channel factory");
+            }
         }
     }
 

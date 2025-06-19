@@ -4,3 +4,5 @@
 //! and manage the shared dependencies and utils across stratum crates.
 #[cfg(feature = "bitcoin")]
 pub use bitcoin;
+pub use secp256k1;
+pub mod url;

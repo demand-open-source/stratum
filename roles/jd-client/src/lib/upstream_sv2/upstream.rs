@@ -11,10 +11,10 @@ use super::super::{
 };
 use async_channel::{Receiver, Sender};
 use binary_sv2::{Seq0255, U256};
-use codec_sv2::{Frame, HandshakeRole, Initiator};
+use codec_sv2::{HandshakeRole, Initiator};
 use error_handling::handle_result;
 use key_utils::Secp256k1PublicKey;
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use network_helpers_sv2::noise_connection::Connection;
 use roles_logic_sv2::{
     channel_logic::channel_factory::PoolChannelFactory,
     common_messages_sv2::{Protocol, SetupConnection},
@@ -110,10 +110,10 @@ pub struct Upstream {
     tx_status: status::Sender,
     /// Minimum `extranonce2` size. Initially requested in the `jdc-config.toml`, and ultimately
     /// set by the SV2 Upstream via the SV2 `OpenExtendedMiningChannelSuccess` message.
+    #[allow(dead_code)]
     pub min_extranonce_size: u16,
+    #[allow(dead_code)]
     pub upstream_extranonce1_size: usize,
-    /// String be included in coinbase tx input scriptsig
-    pub pool_signature: String,
     /// Receives messages from the SV2 Upstream role
     pub receiver: Receiver<EitherFrame>,
     /// Sends messages to the SV2 Upstream role
@@ -144,12 +144,11 @@ impl Upstream {
     /// `UpstreamConnection` with a channel to send and receive messages from the SV2 Upstream
     /// role and uses channels provided in the function arguments to send and receive messages
     /// from the `Downstream`.
-    #[cfg_attr(feature = "cargo-clippy", allow(clippy::too_many_arguments))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         address: SocketAddr,
         authority_public_key: Secp256k1PublicKey,
         min_extranonce_size: u16,
-        pool_signature: String,
         tx_status: status::Sender,
         task_collector: Arc<Mutex<Vec<AbortHandle>>>,
         pool_chaneger_trigger: Arc<Mutex<PoolChangerTrigger>>,
@@ -185,8 +184,8 @@ impl Upstream {
         Ok(Arc::new(Mutex::new(Self {
             channel_id: None,
             min_extranonce_size,
-            upstream_extranonce1_size: 16, // 16 is the default since that is the only value the pool supports currently
-            pool_signature,
+            upstream_extranonce1_size: 16, /* 16 is the default since that is the only value the
+                                            * pool supports currently */
             tx_status,
             receiver,
             sender,
@@ -337,8 +336,8 @@ impl Upstream {
 
                     // Since this is not communicating with an SV2 proxy, but instead a custom SV1
                     // proxy where the routing logic is handled via the `Upstream`'s communication
-                    // channels, we do not use the mining routing logic in the SV2 library and specify
-                    // no mining routing logic here
+                    // channels, we do not use the mining routing logic in the SV2 library and
+                    // specify no mining routing logic here
                     let routing_logic = MiningRoutingLogic::None;
 
                     // Gets the response message for the received SV2 Upstream role message
@@ -365,8 +364,9 @@ impl Upstream {
                         }
                         // No need to handle impossible state just panic cause are impossible and we
                         // will never panic ;-) Verified: handle_message_mining only either panics,
-                        // returns Ok(SendTo::None(None)) or Ok(SendTo::None(Some(m))), or returns Err
-                        // This is a transparent proxy it will only relay messages as received
+                        // returns Ok(SendTo::None(None)) or Ok(SendTo::None(Some(m))), or returns
+                        // Err This is a transparent proxy it will only
+                        // relay messages as received
                         Ok(SendTo::None(_)) => (),
                         Ok(_) => unreachable!(),
                         Err(e) => {
@@ -552,15 +552,14 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
     /// This is a transparent proxy so OpenExtendedMiningChannel is sent as it is downstream.
     /// This message is used also to create a PoolChannelFactory that mock the upstream pool.
     /// this PoolChannelFactory is used by the template provider client in order to check shares
-    /// received by downstream using the right extranonce and seeing the same hash that the downstream
-    /// saw. PoolChannelFactory coinbase pre and suf are setted by the JD client.
+    /// received by downstream using the right extranonce and seeing the same hash that the
+    /// downstream saw. PoolChannelFactory coinbase pre and suf are setted by the JD client.
     fn handle_open_extended_mining_channel_success(
         &mut self,
         m: roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess,
     ) -> Result<SendTo<Downstream>, RolesLogicError> {
         info!("Receive open extended mining channel success");
         let ids = Arc::new(Mutex::new(roles_logic_sv2::utils::GroupId::new()));
-        let pool_signature = self.pool_signature.clone();
         let prefix_len = m.extranonce_prefix.to_vec().len();
         let self_len = 0;
         let total_len = prefix_len + m.extranonce_size as usize;
@@ -582,8 +581,9 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             share_per_min,
             channel_kind,
             vec![],
-            pool_signature,
-        );
+            vec![],
+        )
+        .expect("Signature + extranonce lens exceed 32 bytes");
         let extranonce: Extranonce = m
             .extranonce_prefix
             .into_static()
@@ -695,7 +695,7 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _: roles_logic_sv2::mining_sv2::SetNewPrevHash,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
-        warn!("SNPH received from upstream, proxy ignore it, and use the one declared by JOB DECLARATOR");
+        warn!("SNPH received from upstream, proxy ignored it, and used the one declared by JDC");
         Ok(SendTo::None(None))
     }
 

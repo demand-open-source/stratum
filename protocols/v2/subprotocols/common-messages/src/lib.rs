@@ -1,7 +1,18 @@
+//! # Stratum V2 Common Messages Crate.
+//!
+//! This crate defines a set of shared messages used across all Stratum V2 subprotocols.
+//!
+//! ## Build Options
+//! This crate can be built with the following features:
+//! - `std`: Enables support for standard library features.
+//! - `quickcheck`: Enables support for property-based testing using QuickCheck.
+//!
+//!
+//! For further information about the messages, please refer to [Stratum V2
+//! documentation - Common Messages](https://stratumprotocol.org/specification/03-Protocol-Overview/#36-common-protocol-messages).
+
 #![no_std]
 
-//! Common messages for [stratum v2][Sv2]
-//! The following protocol messages are common across all of the sv2 (sub)protocols.
 extern crate alloc;
 mod channel_endpoint_changed;
 mod setup_connection;
@@ -18,22 +29,22 @@ pub use setup_connection::{
     has_requires_std_job, has_version_rolling, has_work_selection, Protocol, SetupConnection,
     SetupConnectionError, SetupConnectionSuccess,
 };
-#[cfg(not(feature = "with_serde"))]
+
 pub use setup_connection::{CSetupConnection, CSetupConnectionError};
 
-#[cfg(not(feature = "with_serde"))]
 #[no_mangle]
+/// A C-compatible function that exports the [`ChannelEndpointChanged`] struct.
 pub extern "C" fn _c_export_channel_endpoint_changed(_a: ChannelEndpointChanged) {}
 
-#[cfg(not(feature = "with_serde"))]
 #[no_mangle]
+/// A C-compatible function that exports the `SetupConnection` struct.
 pub extern "C" fn _c_export_setup_conn_succ(_a: SetupConnectionSuccess) {}
 
 #[cfg(feature = "prop_test")]
 impl ChannelEndpointChanged {
     pub fn from_gen(g: &mut Gen) -> Self {
         ChannelEndpointChanged {
-            channel_id: u32::arbitrary(g).try_into().unwrap(),
+            channel_id: u32::arbitrary(g),
         }
     }
 }
@@ -70,11 +81,11 @@ impl SetupConnection<'static> {
 
         SetupConnection {
             protocol,
-            min_version: u16::arbitrary(g).try_into().unwrap(),
-            max_version: u16::arbitrary(g).try_into().unwrap(),
-            flags: u32::arbitrary(g).try_into().unwrap(),
+            min_version: u16::arbitrary(g),
+            max_version: u16::arbitrary(g),
+            flags: u32::arbitrary(g),
             endpoint_host,
-            endpoint_port: u16::arbitrary(g).try_into().unwrap(),
+            endpoint_port: u16::arbitrary(g),
             vendor,
             hardware_version,
             firmware,
@@ -92,7 +103,7 @@ impl SetupConnectionError<'static> {
         let error_code: binary_sv2::Str0255 = error_code.try_into().unwrap();
 
         SetupConnectionError {
-            flags: u32::arbitrary(g).try_into().unwrap(),
+            flags: u32::arbitrary(g),
             error_code,
         }
     }
@@ -102,8 +113,8 @@ impl SetupConnectionError<'static> {
 impl SetupConnectionSuccess {
     pub fn from_gen(g: &mut Gen) -> Self {
         SetupConnectionSuccess {
-            used_version: u16::arbitrary(g).try_into().unwrap(),
-            flags: u32::arbitrary(g).try_into().unwrap(),
+            used_version: u16::arbitrary(g),
+            flags: u32::arbitrary(g),
         }
     }
 }

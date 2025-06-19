@@ -21,7 +21,7 @@ use roles_logic_sv2::{
 };
 use tracing::{debug, error, info, warn};
 
-use codec_sv2::{Frame, HandshakeRole, Responder, StandardEitherFrame, StandardSv2Frame};
+use codec_sv2::{HandshakeRole, Responder, StandardEitherFrame, StandardSv2Frame};
 use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
 
 use stratum_common::bitcoin::{consensus::Decodable, TxOut};
@@ -32,13 +32,14 @@ pub type EitherFrame = StandardEitherFrame<Message>;
 
 /// 1 to 1 connection with a downstream node that implement the mining (sub)protocol can be either
 /// a mining device or a downstream proxy.
-/// A downstream can only be linked with an upstream at a time. Support multi upstrems for
-/// downstream do no make much sense.
+/// A downstream can only be linked with an upstream at a time. Support multi upstreams for
+/// downstream do not make much sense.
 #[derive(Debug)]
 pub struct DownstreamMiningNode {
     receiver: Receiver<EitherFrame>,
     sender: Sender<EitherFrame>,
     pub status: DownstreamMiningNodeStatus,
+    #[allow(dead_code)]
     pub prev_job_id: Option<u32>,
     solution_sender: Sender<SubmitSolution<'static>>,
     withhold: bool,
@@ -47,7 +48,7 @@ pub struct DownstreamMiningNode {
     miner_coinbase_output: Vec<TxOut>,
     // used to retreive the job id of the share that we send upstream
     last_template_id: u64,
-    jd: Option<Arc<Mutex<JobDeclarator>>>,
+    pub jd: Option<Arc<Mutex<JobDeclarator>>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -181,7 +182,7 @@ impl DownstreamMiningNode {
         }
     }
 
-    /// Send SetupConnectionSuccess to donwstream and start processing new messages coming from
+    /// Send SetupConnectionSuccess to downstream and start processing new messages coming from
     /// downstream
     pub async fn start(
         self_mutex: &Arc<Mutex<Self>>,
@@ -225,7 +226,7 @@ impl DownstreamMiningNode {
     // mining channel success
     fn set_channel_factory(self_mutex: Arc<Mutex<Self>>) {
         if !self_mutex.safe_lock(|s| s.status.is_solo_miner()).unwrap() {
-            // Safe unwrap already checked if it contains an upstream withe `is_solo_miner`
+            // Safe unwrap already checked if it contains an upstream with `is_solo_miner`
             let upstream = self_mutex
                 .safe_lock(|s| s.status.get_upstream().unwrap())
                 .unwrap();
@@ -289,8 +290,14 @@ impl DownstreamMiningNode {
                 // pool's job_id. The below return as soon as we have a pairable job id for the
                 // template_id associated with this share.
                 let last_template_id = self_mutex.safe_lock(|s| s.last_template_id).unwrap();
-                let job_id =
-                    UpstreamMiningNode::get_job_id(&upstream_mutex, last_template_id).await;
+                let job_id_future =
+                    UpstreamMiningNode::get_job_id(&upstream_mutex, last_template_id);
+                let job_id = match timeout(Duration::from_secs(10), job_id_future).await {
+                    Ok(job_id) => job_id,
+                    Err(_) => {
+                        return;
+                    }
+                };
                 share.job_id = job_id;
                 debug!(
                     "Sending valid block solution upstream, with job_id {}",
@@ -370,12 +377,13 @@ impl DownstreamMiningNode {
         let to_send = to_send.into_values();
         for message in to_send {
             let message = if let Mining::NewExtendedMiningJob(job) = message {
-                let jd = self_mutex.safe_lock(|s| s.jd.clone()).unwrap().unwrap();
-                jd.safe_lock(|jd| jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone())
+                if let Some(jd) = self_mutex.safe_lock(|s| s.jd.clone()).unwrap() {
+                    jd.safe_lock(|jd| {
+                        jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone();
+                        jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone();
+                    })
                     .unwrap();
-                jd.safe_lock(|jd| jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone())
-                    .unwrap();
-
+                }
                 Mining::NewExtendedMiningJob(job)
             } else {
                 message
@@ -484,8 +492,9 @@ impl
                 share_per_min,
                 kind,
                 coinbase_outputs,
-                "SOLO".to_string(),
-            );
+                "SOLO".as_bytes().to_vec(),
+            )
+            .expect("Signature + extranonce lens exceed 32 bytes");
             self.status.set_channel(channel_factory);
 
             let request_id = m.request_id;
@@ -508,7 +517,7 @@ impl
 
     fn handle_update_channel(
         &mut self,
-        _: UpdateChannel,
+        m: UpdateChannel,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
         if !self.status.is_solo_miner() {
             // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
@@ -516,7 +525,16 @@ impl
                 self.status.get_upstream().unwrap(),
             ))
         } else {
-            todo!()
+            let maximum_target =
+                roles_logic_sv2::utils::hash_rate_to_target(m.nominal_hash_rate.into(), 10.0)?;
+            self.status
+                .get_channel()
+                .update_target_for_channel(m.channel_id, maximum_target.clone().into());
+            let set_target = SetTarget {
+                channel_id: m.channel_id,
+                maximum_target,
+            };
+            Ok(SendTo::Respond(Mining::SetTarget(set_target)))
         }
     }
 
@@ -539,7 +557,7 @@ impl
             .unwrap()
         {
             OnNewShare::SendErrorDownstream(s) => {
-                error!("Share do not meet downstream target");
+                error!("Share does not meet the downstream target");
                 Ok(SendTo::Respond(Mining::SubmitSharesError(s)))
             }
             OnNewShare::SendSubmitShareUpstream((m, Some(template_id))) => {
@@ -641,9 +659,13 @@ impl ParseDownstreamCommonMessages<roles_logic_sv2::routing_logic::NoRouting>
     }
 }
 
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use network_helpers_sv2::noise_connection::Connection;
 use std::net::SocketAddr;
-use tokio::{net::TcpListener, task::AbortHandle};
+use tokio::{
+    net::TcpListener,
+    task::AbortHandle,
+    time::{timeout, Duration},
+};
 
 /// Strat listen for downstream mining node. Return as soon as one downstream connect.
 #[allow(clippy::too_many_arguments)]
@@ -661,7 +683,7 @@ pub async fn listen_for_downstream_mining(
     jd: Option<Arc<Mutex<JobDeclarator>>>,
 ) -> Result<Arc<Mutex<DownstreamMiningNode>>, Error> {
     info!("Listening for downstream mining connections on {}", address);
-    let listner = TcpListener::bind(address).await.unwrap();
+    let listner = TcpListener::bind(address).await?;
 
     if let Ok((stream, _)) = listner.accept().await {
         let responder = Responder::from_authority_kp(

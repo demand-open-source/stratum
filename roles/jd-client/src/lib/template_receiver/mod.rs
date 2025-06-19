@@ -1,9 +1,9 @@
 use super::{job_declarator::JobDeclarator, status, PoolChangerTrigger};
 use async_channel::{Receiver, Sender};
-use codec_sv2::{Frame, HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
+use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use error_handling::handle_result;
 use key_utils::Secp256k1PublicKey;
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use network_helpers_sv2::noise_connection::Connection;
 use roles_logic_sv2::{
     handlers::{template_distribution::ParseServerTemplateDistributionMessages, SendTo_},
     job_declaration_sv2::AllocateMiningJobTokenSuccess,
@@ -57,9 +57,17 @@ impl TemplateRx {
         test_only_do_not_send_solution_to_tp: bool,
     ) {
         let mut encoded_outputs = vec![];
-        miner_coinbase_outputs
-            .consensus_encode(&mut encoded_outputs)
-            .expect("Invalid coinbase output in config");
+        // jd is set to None in initialize_jd_as_solo_miner (in this case we need to take the first
+        // output as done by JDS)
+        if jd.is_none() {
+            miner_coinbase_outputs[0]
+                .consensus_encode(&mut encoded_outputs)
+                .expect("Invalid coinbase output in config");
+        } else {
+            miner_coinbase_outputs
+                .consensus_encode(&mut encoded_outputs)
+                .expect("Invalid coinbase output in config");
+        }
         let stream = tokio::net::TcpStream::connect(address).await.unwrap();
 
         let initiator = match authority_public_key {
@@ -198,8 +206,8 @@ impl TemplateRx {
                     match next_message_to_send {
                         Ok(SendTo::None(m)) => {
                             match m {
-                                // Send the new template along with the token to the JD so that JD can
-                                // declare the mining job
+                                // Send the new template along with the token to the JD so that JD
+                                // can declare the mining job
                                 Some(TemplateDistribution::NewTemplate(m)) => {
                                     // See coment on the definition of the global for memory
                                     // ordering

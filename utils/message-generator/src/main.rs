@@ -26,7 +26,7 @@ use std::{
     },
     vec::Vec,
 };
-use tracing::info;
+use tracing::{error, info};
 use tracing_core::{Event, Subscriber};
 use tracing_subscriber::{
     filter::EnvFilter,
@@ -191,6 +191,7 @@ enum ActionResult {
     MatchMessageLen(usize),
     MatchExtensionType(u16),
     CloseConnection,
+    SustainConnection,
     None,
 }
 
@@ -225,6 +226,7 @@ impl std::fmt::Display for ActionResult {
                 write!(f, "MatchExtensionType: {}", extension_type)
             }
             ActionResult::CloseConnection => write!(f, "Close connection"),
+            ActionResult::SustainConnection => write!(f, "Sustain connection"),
             ActionResult::GetMessageField {
                 subprotocol,
                 fields,
@@ -371,6 +373,13 @@ where
     }
 }
 
+fn load_file(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap()
+}
+fn string_to_static_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -383,11 +392,11 @@ async fn main() {
     info!("EXECUTING {}", test_path);
     info!("");
     let mut _test_path = args[1].clone();
-    _test_path.insert_str(0, "../");
+    //_test_path.insert_str(0, "../");
     let test_path_ = &_test_path;
     // Load contents of `test.json`, then parse
-    let test = load_str!(test_path_);
-    let test = parser::Parser::parse_test(test);
+    let test_static = string_to_static_str(load_file(test_path_));
+    let test = parser::Parser::parse_test(test_static);
     let test_name: String = test_path
         .split('/')
         .collect::<Vec<&str>>()
@@ -401,7 +410,8 @@ async fn main() {
     let pass = Arc::new(AtomicBool::new(false));
     {
         let fail = fail.clone();
-        std::panic::set_hook(Box::new(move |_| {
+        std::panic::set_hook(Box::new(move |info| {
+            error!("{:#?}", info);
             fail.store(true, Ordering::Relaxed);
         }));
     }
@@ -423,6 +433,7 @@ async fn main() {
         });
     }
     loop {
+        tokio::task::yield_now().await;
         if fail.load(Ordering::Relaxed) {
             clean_up(cleanup).await;
             let _ = std::panic::take_hook();
@@ -442,7 +453,7 @@ mod test {
         into_static::into_static,
         net::{setup_as_downstream, setup_as_upstream},
     };
-    use codec_sv2::{Frame, Sv2Frame};
+    use codec_sv2::Sv2Frame;
     use roles_logic_sv2::{
         mining_sv2::{
             CloseChannel, NewExtendedMiningJob, OpenExtendedMiningChannel,
@@ -737,8 +748,8 @@ mod test {
     //            "./test/config/pool-config-sri-tp.toml",
     //        ],
     //        ExternalCommandConditions::new_with_timer_secs(60)
-    //            .continue_if_std_out_have("Listening for encrypted connection on: 127.0.0.1:34254"),
-    //    )
+    //            .continue_if_std_out_have("Listening for encrypted connection on:
+    // 127.0.0.1:34254"),    )
     //    .await;
 
     //    let setup_connection = CommonMessages::SetupConnection(SetupConnection {
@@ -765,13 +776,13 @@ mod test {
     //    let frame = EitherFrame::Sv2(frame);
 
     //    let pool_address = SocketAddr::new("127.0.0.1".parse().unwrap(), 34254);
-    //    let pub_key: EncodedEd25519PublicKey = "2di19GHYQnAZJmEpoUeP7C3Eg9TCcksHr23rZCC83dvUiZgiDL"
-    //        .to_string()
+    //    let pub_key: EncodedEd25519PublicKey =
+    // "2di19GHYQnAZJmEpoUeP7C3Eg9TCcksHr23rZCC83dvUiZgiDL"        .to_string()
     //        .try_into()
     //        .unwrap();
     //    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    //    let (recv_from_pool, send_to_pool) = setup_as_downstream(pool_address, Some(pub_key)).await;
-    //    send_to_pool.send(frame.try_into().unwrap()).await.unwrap();
+    //    let (recv_from_pool, send_to_pool) = setup_as_downstream(pool_address,
+    // Some(pub_key)).await;    send_to_pool.send(frame.try_into().unwrap()).await.unwrap();
     //    match recv_from_pool.recv().await.unwrap() {
     //        EitherFrame::Sv2(a) => {
     //            assert!(true)

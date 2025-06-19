@@ -1,0 +1,29 @@
+on:
+  pull_request:
+    branches:
+      - main
+
+name: Integration Tests
+
+jobs:
+  ci:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Use stable toolchain
+        uses: actions/checkout@v4
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Roles Integration Tests
+        run: |
+         RUST_LOG=debug cargo test --manifest-path=roles/Cargo.toml --verbose --test '*' -- --nocapture

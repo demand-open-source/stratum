@@ -1,5 +1,5 @@
 use super::sv2_messages::{message_from_path, ReplaceField};
-use codec_sv2::{buffer_sv2::Slice, Frame as _Frame, Sv2Frame};
+use codec_sv2::{buffer_sv2::Slice, Sv2Frame};
 use roles_logic_sv2::parsers::AnyMessage;
 use serde_json::{Map, Value};
 use std::{collections::HashMap, convert::TryInto};
@@ -49,7 +49,8 @@ impl<'a> Frames<'a> {
                     std::string::String::insert_str(&mut path, 0, "../../../../");
                     let message = message_from_path(&[path, id[1].clone()]);
                     // TODO: if a message is taken from a module, should it be allowed to have a
-                    // replace_fields? perhaps not. In this case, check that no replace_field appears in message
+                    // replace_fields? perhaps not. In this case, check that no replace_field
+                    // appears in message
                     messages.insert(id[1].clone(), (message.clone(), vec![]));
                     (message, id[1].clone())
                 }

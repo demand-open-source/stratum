@@ -2,6 +2,10 @@
 
 How to test Sv2 compliant software against the SRI implementation.
 
+## Requirements
+
+- [Cargo LLVM Cov](https://github.com/taiki-e/cargo-llvm-cov#installation)
+
 ## With Message Generator (MG)
 
 First thing you need to write a test that can be executed by the message generator. In order to do
@@ -25,7 +29,7 @@ been added:
 You can try this test with your desired sv1 mining device in two ways.
  1. launching it from the test itself, editing the part of `execution_commands` relative to the
     launch of the MD.
- 2. removing the part of the test that launches the `/examples/sv1-mining-device` within the SRI.
+ 2. removing the part of the test that launches the `mining_device_sv1` within the SRI.
     Then launch the test and therefore launch separately your desired sv1 MD. 
 
 ## Using the SRI role implementations

@@ -24,7 +24,6 @@ pub fn message_from_path(path: &[String]) -> AnyMessage<'static> {
 
 /// This parses a json object that may or may not (and in this case field is None) have a value
 /// with a particular key. While parsing the file below, the mining_message filed is None
-///
 //        {
 //            "common_messages": [
 //                {
@@ -67,7 +66,6 @@ pub struct TestMessageParser<'a> {
 /// This is not the same CommonMessages as the SRI, but the fiel message is. This structure is
 /// needed because we use the id as a key to retrieve the message; this key is not part of the SRI
 /// type CommonMessage<'a>
-///
 //                      {
 //Defines an SRI messag     "message": {
 //                              "type": "SetupConnectionSuccess",
@@ -365,13 +363,11 @@ pub enum JobDeclaration<'a> {
     DeclareMiningJobSuccess(DeclareMiningJobSuccess<'a>),
     #[serde(borrow)]
     DeclareMiningJobError(DeclareMiningJobError<'a>),
-    IdentifyTransactions(IdentifyTransactions),
-    #[serde(borrow)]
-    IdentifyTransactionsSuccess(IdentifyTransactionsSuccess<'a>),
-    #[serde(borrow)]
     ProvideMissingTransactions(ProvideMissingTransactions<'a>),
     #[serde(borrow)]
     ProvideMissingTransactionsSuccess(ProvideMissingTransactionsSuccess<'a>),
+    #[serde(borrow)]
+    SubmitSolution(SubmitSolutionJd<'a>),
 }
 
 impl<'a> From<JobDeclaration<'a>> for roles_logic_sv2::parsers::JobDeclaration<'a> {
@@ -384,12 +380,11 @@ impl<'a> From<JobDeclaration<'a>> for roles_logic_sv2::parsers::JobDeclaration<'
             JobDeclaration::DeclareMiningJobSuccess(m) => Self::DeclareMiningJobSuccess(m),
             JobDeclaration::DeclareMiningJob(m) => Self::DeclareMiningJob(m),
             JobDeclaration::DeclareMiningJobError(m) => Self::DeclareMiningJobError(m),
-            JobDeclaration::IdentifyTransactions(m) => Self::IdentifyTransactions(m),
-            JobDeclaration::IdentifyTransactionsSuccess(m) => Self::IdentifyTransactionsSuccess(m),
             JobDeclaration::ProvideMissingTransactions(m) => Self::ProvideMissingTransactions(m),
             JobDeclaration::ProvideMissingTransactionsSuccess(m) => {
                 Self::ProvideMissingTransactionsSuccess(m)
             }
+            JobDeclaration::SubmitSolution(m) => Self::SubmitSolution(m),
         }
     }
 }

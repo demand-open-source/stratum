@@ -1,12 +1,7 @@
 on:
-  push:
-    branches:
-      - main
-      - dev
   pull_request:
     branches:
       - main
-      - dev
 
 name: Test, Prop Tests, Example Tests
 
@@ -16,17 +11,17 @@ jobs:
     strategy:
       matrix:
         os:
-          - macos-latest
+          - macos-13
           - ubuntu-latest
         include:
-          - os: macos-latest
+          - os: macos-13
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
 
     steps:
       - name: Install stable toolchain & components
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           profile: minimal
           toolchain: nightly
@@ -42,7 +37,7 @@ jobs:
 
       - name: Run sv1-client-and-server example
         run: |
-          cargo run --manifest-path=examples/sv1-client-and-server/Cargo.toml --bin client_and_server -- 60
+          cargo run --manifest-path=protocols/v1/Cargo.toml --example client_and_server 30
 
       - name: interop-test
         run: |
@@ -84,10 +79,10 @@ jobs:
         run: |
           cargo test --manifest-path=protocols/Cargo.toml --features prop_test
 
-      - name: Run ping-pong-with-noise example
+      - name: Run ping-pong-encrypted example
         run: |
-          cargo run --manifest-path=examples/ping-pong-with-noise/Cargo.toml --bin ping_pong_with_noise -- 10
+          cargo run --manifest-path=examples/ping-pong-encrypted/Cargo.toml
 
-      - name: Run ping-pong-without-noise example
+      - name: Run ping-pong example
         run: |
-          cargo run --manifest-path=examples/ping-pong-without-noise/Cargo.toml --bin ping_pong_without_noise -- 10
+          cargo run --manifest-path=examples/ping-pong/Cargo.toml

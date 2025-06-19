@@ -1,14 +1,16 @@
 #![allow(dead_code)]
 
-use super::EXTRANONCE_RANGE_1_LENGTH;
-use roles_logic_sv2::utils::Id;
+use core::convert::TryInto;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use super::downstream_mining::{Channel, DownstreamMiningNode, StdFrame as DownstreamFrame};
 use async_channel::{Receiver, SendError, Sender};
 use async_recursion::async_recursion;
-use codec_sv2::{Frame, HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
-use network_helpers_sv2::noise_connection_tokio::Connection;
 use nohash_hasher::BuildNoHashHasher;
+use tokio::{net::TcpStream, task};
+use tracing::{debug, error, info};
+
+use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
+use network_helpers_sv2::noise_connection::Connection;
 use roles_logic_sv2::{
     channel_logic::{
         channel_factory::{ExtendedChannelKind, OnNewShare, ProxyExtendedChannelFactory, Share},
@@ -26,13 +28,14 @@ use roles_logic_sv2::{
     routing_logic::MiningProxyRoutingLogic,
     selectors::{DownstreamMiningSelector, ProxyDownstreamMiningSelector as Prs},
     template_distribution_sv2::SubmitSolution,
-    utils::{GroupId, Mutex},
+    utils::{GroupId, Id, Mutex},
 };
-use std::{collections::HashMap, sync::Arc};
-use tokio::{net::TcpStream, task};
-use tracing::error;
-
 use stratum_common::bitcoin::TxOut;
+
+use super::{
+    downstream_mining::{Channel, DownstreamMiningNode, StdFrame as DownstreamFrame},
+    EXTRANONCE_RANGE_1_LENGTH,
+};
 
 pub type Message = PoolMessages<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
@@ -84,7 +87,6 @@ impl ChannelKind {
                     downstream_share_per_minute,
                     kind,
                     Some(vec![]),
-                    String::from(""),
                     up_id,
                 );
                 *self = Self::Extended(Some(factory));
@@ -115,8 +117,8 @@ impl From<super::ChannelKind> for ChannelKind {
 
 /// 1 to 1 connection with a pool
 /// Can be either a mining pool or another proxy
-/// 1 to 1 connection with an upstream node that implement the mining (sub)protocol can be either a a pool or an
-/// upstream proxy.
+/// 1 to 1 connection with an upstream node that implement the mining (sub)protocol can be either a
+/// a pool or an upstream proxy.
 #[derive(Debug, Clone)]
 struct UpstreamMiningConnection {
     receiver: Receiver<EitherFrame>,
@@ -177,20 +179,16 @@ pub struct UpstreamMiningNode {
     #[allow(dead_code)]
     tx_outs: HashMap<Vec<u8>, Vec<TxOut>>,
     // When a future job is received from an extended channel this is transformed to severla std
-    // job for HOM downstream. If the job is future we need to keep track of the original job id and
-    // the new job ids used for the std job and also which downstream received which id. When a set
-    // new prev hash is received if it refer one of these ids we use this map and build the right
-    // set new pre hash for each downstream. TODO who is clearing the map?
+    // job for HOM downstream. If the job is future we need to keep track of the original job id
+    // and the new job ids used for the std job and also which downstream received which id.
+    // When a set new prev hash is received if it refer one of these ids we use this map and
+    // build the right set new pre hash for each downstream. TODO who is clearing the map?
     #[allow(clippy::type_complexity)]
     job_up_to_down_ids:
         HashMap<u32, Vec<(Arc<Mutex<DownstreamMiningNode>>, u32)>, BuildNoHashHasher<u32>>,
     downstream_hash_rate: f32,
     reconnect: bool,
 }
-
-use core::convert::TryInto;
-use std::{net::SocketAddr, time::Duration};
-use tracing::{debug, info};
 
 /// It assume that endpoint NEVER change flags and version!
 /// I can open both extended and group channel with upstream.
@@ -471,11 +469,10 @@ impl UpstreamMiningNode {
                     super::downstream_mining::DownstreamMiningNodeStatus::ChannelOpened(
                         channel,
                     ) => match channel {
-                        Channel::DowntreamHomUpstreamGroup { channel_id, .. } => Some(*channel_id),
-                        Channel::DowntreamHomUpstreamExtended { channel_id, .. } => {
+                        Channel::DownstreamHomUpstreamGroup { channel_id, .. } => Some(*channel_id),
+                        Channel::DownstreamHomUpstreamExtended { channel_id, .. } => {
                             Some(*channel_id)
                         }
-                        Channel::DowntreamNonHomUpstreamExtended { .. } => todo!(),
                     },
                 })
                 .unwrap()
@@ -826,8 +823,9 @@ impl UpstreamMiningNode {
                             Ok(message)
                         }
                         Share::Standard(_) => {
-                            // on_submit_shares_standard call check_target that in the case of a Proxy
-                            // and a share that is below the bitcoin target if the share is a standard
+                            // on_submit_shares_standard call check_target that in the case of a
+                            // Proxy and a share that is below the
+                            // bitcoin target if the share is a standard
                             // share call share.into_extended making this branch unreachable.
                             unreachable!()
                         }
@@ -863,13 +861,13 @@ impl UpstreamMiningNode {
     // pub async fn next_faster(&mut self, mut incoming: StdFrame) {
     //     let message_type = incoming.get_header().unwrap().msg_type();
 
-    //     // When a channel is opened we need to setup the channel id in order to relay next messages
-    //     // to the right Downstream
+    //     // When a channel is opened we need to setup the channel id in order to relay next
+    // messages     // to the right Downstream
     //     if todo!() { // check if message_type is channel related
 
-    //         // When a mining message is received (that is not a channel related message) always relay it downstream
-    //     } else if todo!()  { // check if message_type is is a mining message
-    //         // everything here can be just relayed downstream
+    //         // When a mining message is received (that is not a channel related message) always
+    // relay it downstream     } else if todo!()  { // check if message_type is is a mining
+    // message         // everything here can be just relayed downstream
 
     //         // Other sub(protocol) messages
     //     } else {
@@ -918,9 +916,10 @@ impl
                         .unwrap();
                     Ok(SendTo::Multiple(res))
                 } else {
-                    // Here we want to support only the case where downstream is non HOM and want to open
-                    // extended channels with the proxy. Dowstream non HOM that try to open standard
-                    // channel (grouped in groups) do not make much sense so for now is not supported
+                    // Here we want to support only the case where downstream is non HOM and want to
+                    // open extended channels with the proxy. Dowstream non HOM
+                    // that try to open standard channel (grouped in groups) do
+                    // not make much sense so for now is not supported
                     panic!()
                 }
             }
@@ -1048,7 +1047,7 @@ impl
                     .ok_or(Error::NoDownstreamsConnected)?;
                 for downstream in downstreams {
                     match downstream.safe_lock(|r| r.get_channel().clone()).unwrap() {
-                        Channel::DowntreamHomUpstreamGroup {
+                        Channel::DownstreamHomUpstreamGroup {
                             channel_id,
                             group_id,
                             ..
@@ -1257,8 +1256,9 @@ impl IsMiningUpstream<DownstreamMiningNode, ProxyRemoteSelector> for UpstreamMin
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
 
     #[test]
     fn new_upstream_minining_node() {

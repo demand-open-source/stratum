@@ -1,10 +1,10 @@
-use std::fmt;
-
+use ext_config::ConfigError;
 use roles_logic_sv2::mining_sv2::{ExtendedExtranonce, NewExtendedMiningJob, SetCustomMiningJob};
-use stratum_common::bitcoin::util::uint::ParseLengthError;
+use std::fmt;
 
 pub type ProxyResult<'a, T> = core::result::Result<T, Error<'a>>;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum ChannelSendError<'a> {
     SubmitSharesExtended(
@@ -27,11 +27,12 @@ pub enum ChannelSendError<'a> {
 
 #[derive(Debug)]
 pub enum Error<'a> {
+    #[allow(dead_code)]
     VecToSlice32(Vec<u8>),
     /// Errors on bad CLI argument input.
     BadCliArgs,
-    /// Errors on bad `toml` deserialize.
-    BadTomlDeserialize(toml::de::Error),
+    /// Errors on bad `config` TOML deserialize.
+    BadConfigDeserialize(ConfigError),
     /// Errors from `binary_sv2` crate.
     BinarySv2(binary_sv2::Error),
     /// Errors on bad noise handshake.
@@ -54,7 +55,6 @@ pub enum Error<'a> {
     TokioChannelErrorRecv(tokio::sync::broadcast::error::RecvError),
     // Channel Sender Errors
     ChannelErrorSender(ChannelSendError<'a>),
-    Uint256Conversion(ParseLengthError),
     Infallible(std::convert::Infallible),
 }
 
@@ -63,7 +63,7 @@ impl<'a> fmt::Display for Error<'a> {
         use Error::*;
         match self {
             BadCliArgs => write!(f, "Bad CLI arg input"),
-            BadTomlDeserialize(ref e) => write!(f, "Bad `toml` deserialize: `{:?}`", e),
+            BadConfigDeserialize(ref e) => write!(f, "Bad `config` TOML deserialize: `{:?}`", e),
             BinarySv2(ref e) => write!(f, "Binary SV2 error: `{:?}`", e),
             CodecNoise(ref e) => write!(f, "Noise error: `{:?}", e),
             FramingSv2(ref e) => write!(f, "Framing SV2 error: `{:?}`", e),
@@ -76,7 +76,6 @@ impl<'a> fmt::Display for Error<'a> {
             ChannelErrorReceiver(ref e) => write!(f, "Channel receive error: `{:?}`", e),
             TokioChannelErrorRecv(ref e) => write!(f, "Channel receive error: `{:?}`", e),
             ChannelErrorSender(ref e) => write!(f, "Channel send error: `{:?}`", e),
-            Uint256Conversion(ref e) => write!(f, "U256 Conversion Error: `{:?}`", e),
             VecToSlice32(ref e) => write!(f, "Standard Error: `{:?}`", e),
             Infallible(ref e) => write!(f, "Infallible Error:`{:?}`", e),
         }
@@ -119,9 +118,9 @@ impl<'a> From<roles_logic_sv2::errors::Error> for Error<'a> {
     }
 }
 
-impl<'a> From<toml::de::Error> for Error<'a> {
-    fn from(e: toml::de::Error) -> Self {
-        Error::BadTomlDeserialize(e)
+impl<'a> From<ConfigError> for Error<'a> {
+    fn from(e: ConfigError) -> Self {
+        Error::BadConfigDeserialize(e)
     }
 }
 
@@ -206,18 +205,6 @@ impl<'a>
         )>,
     ) -> Self {
         Error::ChannelErrorSender(ChannelSendError::NewTemplate(e))
-    }
-}
-
-impl<'a> From<Vec<u8>> for Error<'a> {
-    fn from(e: Vec<u8>) -> Self {
-        Error::VecToSlice32(e)
-    }
-}
-
-impl<'a> From<ParseLengthError> for Error<'a> {
-    fn from(e: ParseLengthError) -> Self {
-        Error::Uint256Conversion(e)
     }
 }
 

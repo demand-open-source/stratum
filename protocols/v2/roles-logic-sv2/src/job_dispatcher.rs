@@ -1,7 +1,9 @@
-//! The Job Dispatcher contains relevant logic to maintain group channels in proxy roles such as:
+//! Job Dispatcher
+//!
+//! This module contains relevant logic to maintain group channels in proxy roles such as:
 //! - converting extended jobs to standard jobs
-//! - handling updates to jobs when new templates and prev hashes arrive,
-//!     as well as cleaning up old jobs
+//! - handling updates to jobs when new templates and prev hashes arrive, as well as cleaning up old
+//!   jobs
 //! - determining if submitted shares correlate to valid jobs
 
 use crate::{
@@ -18,8 +20,7 @@ use std::{collections::HashMap, convert::TryInto, sync::Arc};
 
 use stratum_common::bitcoin::hashes::{sha256d, Hash, HashEngine};
 
-/// Used to convert an extended mining job to a standard mining job. The `extranonce` field must
-/// be exactly 32 bytes.
+/// Used to convert an extended mining job to a standard mining job
 pub fn extended_to_standard_job_for_group_channel<'a>(
     extended: &NewExtendedMiningJob,
     extranonce: &[u8],
@@ -31,6 +32,7 @@ pub fn extended_to_standard_job_for_group_channel<'a>(
         extended.coinbase_tx_suffix.inner_as_ref(),
         extranonce,
         &extended.merkle_path.inner_as_ref(),
+        &[],
     );
 
     Some(NewMiningJob {
@@ -41,8 +43,10 @@ pub fn extended_to_standard_job_for_group_channel<'a>(
         merkle_root: merkle_root?.try_into().ok()?,
     })
 }
+
+// helper struct to easily calculate block hashes from headers
 #[allow(dead_code)]
-struct BlockHeader<'a> {
+struct Header<'a> {
     version: u32,
     prev_hash: &'a [u8],
     merkle_root: &'a [u8],
@@ -51,8 +55,8 @@ struct BlockHeader<'a> {
     nonce: u32,
 }
 
-impl<'a> BlockHeader<'a> {
-    /// calculates the sha256 blockhash of the header
+impl<'a> Header<'a> {
+    // calculates the sha256 blockhash of the header
     #[allow(dead_code)]
     pub fn hash(&self) -> Target {
         let mut engine = sha256d::Hash::engine();
@@ -62,39 +66,17 @@ impl<'a> BlockHeader<'a> {
         engine.input(&self.timestamp.to_be_bytes());
         engine.input(&self.nbits.to_be_bytes());
         engine.input(&self.nonce.to_be_bytes());
-        let hashed = sha256d::Hash::from_engine(engine).into_inner();
+        let hashed: [u8; 32] = *sha256d::Hash::from_engine(engine).as_ref();
         hashed.into()
     }
 }
 
-#[allow(dead_code)]
-fn target_from_shares(
-    job: &DownstreamJob,
-    prev_hash: &[u8],
-    nbits: u32,
-    share: &SubmitSharesStandard,
-) -> Target {
-    let header = BlockHeader {
-        version: share.version,
-        prev_hash,
-        merkle_root: &job.merkle_root,
-        timestamp: share.ntime,
-        nbits,
-        nonce: share.nonce,
-    };
-    header.hash()
-}
-
+// helper struct to identify Standard Jobs being managed for downstream
 #[derive(Debug)]
 struct DownstreamJob {
+    #[allow(dead_code)]
     merkle_root: Vec<u8>,
     extended_job_id: u32,
-}
-
-#[derive(Debug)]
-struct ExtendedJobs {
-    #[allow(dead_code)]
-    upstream_target: Vec<u8>,
 }
 
 /// Used by proxies to keep track of standard jobs in the group channel
@@ -117,13 +99,15 @@ pub struct GroupChannelJobDispatcher {
     nbits: u32,
 }
 
+/// Used to signal if submitted shares correlate to valid jobs
 pub enum SendSharesResponse {
-    //ValidAndMeetUpstreamTarget((SubmitSharesStandard,SubmitSharesSuccess)),
+    /// ValidAndMeetUpstreamTarget((SubmitSharesStandard,SubmitSharesSuccess)),
     Valid(SubmitSharesStandard),
     Invalid(SubmitSharesError<'static>),
 }
 
 impl GroupChannelJobDispatcher {
+    /// constructor
     pub fn new(ids: Arc<Mutex<Id>>) -> Self {
         Self {
             target: [0_u8; 32].into(),
@@ -139,13 +123,14 @@ impl GroupChannelJobDispatcher {
     /// When a downstream opens a connection with a proxy, the proxy uses this function to create a
     /// new mining job from the last valid new extended mining job.
     ///
-    /// When a proxy receives a new extended mining job from upstream it uses this function to create
-    /// the corresponding new mining job for each connected downstream.
+    /// When a proxy receives a new extended mining job from upstream it uses this function to
+    /// create the corresponding new mining job for each connected downstream.
     #[allow(clippy::option_map_unit_fn)]
     pub fn on_new_extended_mining_job(
         &mut self,
         extended: &NewExtendedMiningJob,
         channel: &StandardChannel,
+        additional_coinbase_script_data: &[u8],
         // should be changed to return a Result<Option<NewMiningJob>>
     ) -> Option<NewMiningJob<'static>> {
         if extended.is_future() {
@@ -161,9 +146,17 @@ impl GroupChannelJobDispatcher {
         let standard_job_id = self.ids.safe_lock(|ids| ids.next()).unwrap();
 
         let extranonce: Vec<u8> = channel.extranonce.clone().into();
+        let mut prefix: Vec<u8> =
+            Vec::with_capacity(extranonce.len() + additional_coinbase_script_data.len());
+        for b in additional_coinbase_script_data {
+            prefix.push(*b);
+        }
+        for b in extranonce {
+            prefix.push(b);
+        }
         let new_mining_job_message = extended_to_standard_job_for_group_channel(
             extended,
-            &extranonce,
+            &prefix,
             channel.channel_id,
             standard_job_id,
         )?;
@@ -218,8 +211,8 @@ impl GroupChannelJobDispatcher {
         }
     }
 
-    /// takes shares submitted by a group channel miner and determines if the shares correspond to a valid
-    /// job.
+    /// takes shares submitted by a group channel miner and determines if the shares correspond to a
+    /// valid job.
     pub fn on_submit_shares(&self, shares: SubmitSharesStandard) -> SendSharesResponse {
         let id = shares.job_id;
         if let Some(job) = self.jobs.get(&id) {
@@ -260,7 +253,7 @@ mod tests {
     use quickcheck::{Arbitrary, Gen};
     use std::convert::TryFrom;
 
-    use stratum_common::bitcoin::{Script, TxOut};
+    use stratum_common::bitcoin::{Amount, ScriptBuf, TxOut};
 
     const BLOCK_REWARD: u64 = 625_000_000_000;
 
@@ -287,7 +280,7 @@ mod tests {
         let le_prev_hash = be_prev_hash.as_slice();
         let le_merkle_root = be_merkle_root.as_slice();
 
-        let block_header: BlockHeader = BlockHeader {
+        let block_header: Header = Header {
             version: le_version,
             prev_hash: le_prev_hash,
             merkle_root: le_merkle_root,
@@ -310,19 +303,20 @@ mod tests {
 
     #[test]
     fn test_group_channel_job_dispatcher() {
+        let extranonce_len = 16;
         let out = TxOut {
-            value: BLOCK_REWARD,
-            script_pubkey: Script::new_p2pk(&new_pub_key()),
+            value: Amount::from_sat(BLOCK_REWARD),
+            script_pubkey: ScriptBuf::new_p2pk(&new_pub_key()),
         };
-        let pool_signature = "Stratum v2 SRI Pool".to_string();
-        let mut jobs_creators = JobsCreators::new(32);
+        let pool_signature = "Stratum v2 SRI".to_string();
+        let mut jobs_creators = JobsCreators::new(extranonce_len);
         let group_channel_id = 1;
         //Create a template
         let mut template = template_from_gen(&mut Gen::new(255));
         template.template_id = template.template_id % u64::MAX;
         template.future_template = true;
         let extended_mining_job = jobs_creators
-            .on_new_template(&mut template, false, vec![out], pool_signature)
+            .on_new_template(&mut template, false, vec![out], pool_signature.len() as u8)
             .expect("Failed to create new job");
 
         // create GroupChannelJobDispatcher
@@ -331,8 +325,9 @@ mod tests {
         // create standard channel
         let target = Target::from(U256::try_from(utils::extranonce_gen()).unwrap());
         let standard_channel_id = 2;
-        let extranonce = Extranonce::try_from(utils::extranonce_gen())
-            .expect("Failed to convert bytes to extranonce");
+        let extranonce =
+            Extranonce::try_from(utils::extranonce_gen()[0..extranonce_len as usize].to_vec())
+                .expect("Failed to convert bytes to extranonce");
         let standard_channel = StandardChannel {
             channel_id: standard_channel_id,
             group_id: group_channel_id,
@@ -341,7 +336,11 @@ mod tests {
         };
         // call target function (on_new_extended_mining_job)
         let new_mining_job = group_channel_dispatcher
-            .on_new_extended_mining_job(&extended_mining_job, &standard_channel)
+            .on_new_extended_mining_job(
+                &extended_mining_job,
+                &standard_channel,
+                &pool_signature.clone().into_bytes(),
+            )
             .unwrap();
 
         // on_new_extended_mining_job assertions
@@ -351,6 +350,7 @@ mod tests {
             &extended_mining_job,
             extranonce.clone(),
             standard_channel_id,
+            &pool_signature,
         );
         // on_new_prev_hash assertions
         if extended_mining_job.is_future() {
@@ -374,13 +374,23 @@ mod tests {
         extended_mining_job: &NewExtendedMiningJob,
         extranonce: Extranonce,
         standard_channel_id: u32,
+        pool_signature: &String,
     ) -> (u32, Vec<u8>) {
+        let extranonce: Vec<u8> = extranonce.clone().into();
+        let mut prefix: Vec<u8> = Vec::new();
+        for b in pool_signature.clone().into_bytes() {
+            prefix.push(b);
+        }
+        for b in extranonce {
+            prefix.push(b);
+        }
         // compute test merkle path
         let new_root = merkle_root_from_path(
             extended_mining_job.coinbase_tx_prefix.inner_as_ref(),
             extended_mining_job.coinbase_tx_suffix.inner_as_ref(),
-            extranonce.to_vec().as_slice(),
+            prefix.as_slice(),
             &extended_mining_job.merkle_path.inner_as_ref(),
+            &[],
         )
         .unwrap();
         // Assertions
@@ -497,21 +507,21 @@ mod tests {
         job_id: u32,
     ) {
         let shares = SubmitSharesStandard {
-            /// Channel identification.
+            // Channel identification.
             channel_id: standard_channel_id,
-            /// Unique sequential identifier of the submit within the channel.
+            // Unique sequential identifier of the submit within the channel.
             sequence_number: 0,
-            /// Identifier of the job as provided by *NewMiningJob* or
-            /// *NewExtendedMiningJob* message.
+            // Identifier of the job as provided by *NewMiningJob* or
+            // *NewExtendedMiningJob* message.
             job_id,
-            /// Nonce leading to the hash being submitted.
+            // Nonce leading to the hash being submitted.
             nonce: 1,
-            /// The nTime field in the block header. This MUST be greater than or equal
-            /// to the header_timestamp field in the latest SetNewPrevHash message
-            /// and lower than or equal to that value plus the number of seconds since
-            /// the receipt of that message.
+            // The nTime field in the block header. This MUST be greater than or equal
+            // to the header_timestamp field in the latest SetNewPrevHash message
+            // and lower than or equal to that value plus the number of seconds since
+            // the receipt of that message.
             ntime: 1,
-            /// Full nVersion field.
+            // Full nVersion field.
             version: 1,
         };
         let mut faulty_shares = shares.clone();

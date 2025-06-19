@@ -9,12 +9,11 @@ use crate::{
     upstream_sv2::{EitherFrame, Message, StdFrame, UpstreamConnection},
 };
 use async_channel::{Receiver, Sender};
-use async_std::{net::TcpStream, task};
 use binary_sv2::u256_from_int;
-use codec_sv2::{Frame, HandshakeRole, Initiator};
+use codec_sv2::{HandshakeRole, Initiator};
 use error_handling::handle_result;
 use key_utils::Secp256k1PublicKey;
-use network_helpers_sv2::Connection;
+use network_helpers_sv2::noise_connection::Connection;
 use roles_logic_sv2::{
     common_messages_sv2::{Protocol, SetupConnection},
     common_properties::{IsMiningUpstream, IsUpstream},
@@ -36,8 +35,11 @@ use roles_logic_sv2::{
 use std::{
     net::SocketAddr,
     sync::{atomic::AtomicBool, Arc},
-    thread::sleep,
-    time::Duration,
+};
+use tokio::{
+    net::TcpStream,
+    task::AbortHandle,
+    time::{sleep, Duration},
 };
 use tracing::{error, info, warn};
 
@@ -77,9 +79,10 @@ pub struct Upstream {
     /// Sends SV2 `NewExtendedMiningJob` messages to be translated (along with SV2 `SetNewPrevHash`
     /// messages) into SV1 `mining.notify` messages. Received and translated by the `Bridge`.
     tx_sv2_new_ext_mining_job: Sender<NewExtendedMiningJob<'static>>,
-    /// Sends the extranonce1 and the channel id received in the SV2 `OpenExtendedMiningChannelSuccess` message to be
-    /// used by the `Downstream` and sent to the Downstream role in a SV2 `mining.subscribe`
-    /// response message. Passed to the `Downstream` on connection creation.
+    /// Sends the extranonce1 and the channel id received in the SV2
+    /// `OpenExtendedMiningChannelSuccess` message to be used by the `Downstream` and sent to
+    /// the Downstream role in a SV2 `mining.subscribe` response message. Passed to the
+    /// `Downstream` on connection creation.
     tx_sv2_extranonce: Sender<(ExtendedExtranonce, u32)>,
     /// This allows the upstream threads to be able to communicate back to the main thread its
     /// current status.
@@ -98,6 +101,7 @@ pub struct Upstream {
     // and the upstream just needs to occasionally check if it has changed more than
     // than the configured percentage
     pub(super) difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+    task_collector: Arc<Mutex<Vec<(AbortHandle, String)>>>,
 }
 
 impl PartialEq for Upstream {
@@ -112,7 +116,7 @@ impl Upstream {
     /// `UpstreamConnection` with a channel to send and receive messages from the SV2 Upstream
     /// role and uses channels provided in the function arguments to send and receive messages
     /// from the `Downstream`.
-    #[cfg_attr(feature = "cargo-clippy", allow(clippy::too_many_arguments))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         address: SocketAddr,
         authority_public_key: Secp256k1PublicKey,
@@ -124,6 +128,7 @@ impl Upstream {
         tx_status: status::Sender,
         target: Arc<Mutex<Vec<u8>>>,
         difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        task_collector: Arc<Mutex<Vec<(AbortHandle, String)>>>,
     ) -> ProxyResult<'static, Arc<Mutex<Self>>> {
         // Connect to the SV2 Upstream role retry connection every 5 seconds.
         let socket = loop {
@@ -135,7 +140,7 @@ impl Upstream {
                         address, e
                     );
 
-                    sleep(Duration::from_secs(5));
+                    sleep(Duration::from_secs(5)).await;
                 }
             }
         };
@@ -149,7 +154,7 @@ impl Upstream {
         );
 
         // Channel to send and receive messages to the SV2 Upstream role
-        let (receiver, sender) = Connection::new(socket, HandshakeRole::Initiator(initiator), 10)
+        let (receiver, sender, _, _) = Connection::new(socket, HandshakeRole::Initiator(initiator))
             .await
             .unwrap();
         // Initialize `UpstreamConnection` with channel for SV2 Upstream role communication and
@@ -166,11 +171,12 @@ impl Upstream {
             job_id: None,
             last_job_id: None,
             min_extranonce_size,
-            upstream_extranonce1_size: 16, // 16 is the default since that is the only value the pool supports currently
+            upstream_extranonce1_size: 8,
             tx_sv2_extranonce,
             tx_status,
             target,
             difficulty_config,
+            task_collector,
         })))
     }
 
@@ -179,6 +185,7 @@ impl Upstream {
         self_: Arc<Mutex<Self>>,
         min_version: u16,
         max_version: u16,
+        min_extranonce_size: u16,
     ) -> ProxyResult<'static, ()> {
         // Get the `SetupConnection` message with Mining Device information (currently hard coded)
         let setup_connection = Self::get_setup_connection_message(min_version, max_version, false)?;
@@ -235,8 +242,8 @@ impl Upstream {
             request_id: 0, // TODO
             user_identity, // TODO
             nominal_hash_rate,
-            max_target: u256_from_int(u64::MAX), // TODO
-            min_extranonce_size: 8, // 8 is the max extranonce2 size the braiins pool supports
+            max_target: u256_from_int(u64::MAX),
+            min_extranonce_size,
         });
 
         // reset channel hashrate so downstreams can manage from now on out
@@ -259,6 +266,9 @@ impl Upstream {
     #[allow(clippy::result_large_err)]
     pub fn parse_incoming(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
         let clone = self_.clone();
+        let task_collector = self_.safe_lock(|s| s.task_collector.clone()).unwrap();
+        let collector1 = task_collector.clone();
+        let collector2 = task_collector.clone();
         let (
             tx_frame,
             tx_sv2_extranonce,
@@ -281,16 +291,22 @@ impl Upstream {
         {
             let self_ = self_.clone();
             let tx_status = tx_status.clone();
-            task::spawn(async move {
+            let start_diff_management = tokio::task::spawn(async move {
                 // No need to start diff management immediatly
-                async_std::task::sleep(Duration::from_secs(10)).await;
+                sleep(Duration::from_secs(10)).await;
                 loop {
                     handle_result!(tx_status, Self::try_update_hashrate(self_.clone()).await);
                 }
             });
+            let _ = collector1.safe_lock(|a| {
+                a.push((
+                    start_diff_management.abort_handle(),
+                    "start_diff_management".to_string(),
+                ))
+            });
         }
 
-        task::spawn(async move {
+        let parse_incoming = tokio::task::spawn(async move {
             loop {
                 // Waiting to receive a message from the SV2 Upstream role
                 let incoming = handle_result!(tx_status, recv.recv().await);
@@ -433,6 +449,8 @@ impl Upstream {
                 }
             }
         });
+        let _ = collector2
+            .safe_lock(|a| a.push((parse_incoming.abort_handle(), "parse_incoming".to_string())));
 
         Ok(())
     }
@@ -459,6 +477,7 @@ impl Upstream {
 
     #[allow(clippy::result_large_err)]
     pub fn handle_submit(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
+        let task_collector = self_.safe_lock(|s| s.task_collector.clone()).unwrap();
         let clone = self_.clone();
         let (tx_frame, receiver, tx_status) = clone
             .safe_lock(|s| {
@@ -470,7 +489,7 @@ impl Upstream {
             })
             .map_err(|_| PoisonLock)?;
 
-        task::spawn(async move {
+        let handle_submit = tokio::task::spawn(async move {
             loop {
                 let mut sv2_submit: SubmitSharesExtended =
                     handle_result!(tx_status, receiver.recv().await);
@@ -506,6 +525,9 @@ impl Upstream {
                 );
             }
         });
+        let _ = task_collector
+            .safe_lock(|a| a.push((handle_submit.abort_handle(), "handle_submit".to_string())));
+
         Ok(())
     }
 

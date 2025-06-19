@@ -2,22 +2,21 @@ pub mod message_handler;
 use async_channel::{Receiver, Sender};
 use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use network_helpers_sv2::noise_connection::Connection;
 use roles_logic_sv2::{
     handlers::SendTo_,
     job_declaration_sv2::{AllocateMiningJobTokenSuccess, SubmitSolutionJd},
     mining_sv2::SubmitSharesExtended,
     parsers::{JobDeclaration, PoolMessages},
     template_distribution_sv2::SetNewPrevHash,
-    utils::{hash_lists_tuple, Mutex},
+    utils::Mutex,
 };
 use std::{collections::HashMap, convert::TryInto, str::FromStr};
-use stratum_common::bitcoin::{util::psbt::serialize::Deserialize, Transaction};
+use stratum_common::bitcoin::{consensus, Transaction};
 use tokio::task::AbortHandle;
 use tracing::{error, info};
 
 use async_recursion::async_recursion;
-use codec_sv2::Frame;
 use nohash_hasher::BuildNoHashHasher;
 use roles_logic_sv2::{
     handlers::job_declaration::ParseServerJobDeclarationMessages,
@@ -55,8 +54,9 @@ pub struct JobDeclarator {
     req_ids: Id,
     min_extranonce_size: u16,
     // (Sent DeclareMiningJob, is future, template id, merkle path)
-    last_declare_mining_job_sent: Option<LastDeclareJob>,
+    last_declare_mining_jobs_sent: [Option<(u32, LastDeclareJob)>; 2],
     last_set_new_prev_hash: Option<SetNewPrevHash<'static>>,
+    set_new_prev_hash_counter: u8,
     #[allow(clippy::type_complexity)]
     future_jobs: HashMap<
         u64,
@@ -114,13 +114,14 @@ impl JobDeclarator {
             allocated_tokens: vec![],
             req_ids: Id::new(),
             min_extranonce_size,
-            last_declare_mining_job_sent: None,
+            last_declare_mining_jobs_sent: [None, None],
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
             up,
             task_collector,
             coinbase_tx_prefix: vec![].try_into().unwrap(),
             coinbase_tx_suffix: vec![].try_into().unwrap(),
+            set_new_prev_hash_counter: 0,
         }));
 
         Self::allocate_tokens(&self_, 2).await;
@@ -128,20 +129,50 @@ impl JobDeclarator {
         Ok(self_)
     }
 
-    fn get_last_declare_job_sent(self_mutex: &Arc<Mutex<Self>>) -> LastDeclareJob {
+    fn get_last_declare_job_sent(
+        self_mutex: &Arc<Mutex<Self>>,
+        request_id: u32,
+    ) -> Option<LastDeclareJob> {
         self_mutex
             .safe_lock(|s| {
-                s.last_declare_mining_job_sent
-                    .clone()
-                    .expect("unreachable code")
+                for (id, job) in s.last_declare_mining_jobs_sent.iter().flatten() {
+                    if *id == request_id {
+                        return Some(job.to_owned());
+                    }
+                }
+                None
             })
             .unwrap()
     }
 
-    fn update_last_declare_job_sent(self_mutex: &Arc<Mutex<Self>>, j: LastDeclareJob) {
+    /// We maintain a window of 2 jobs. If more than 2 blocks are found,
+    /// the ordering will depend on the request ID. Only the 2 most recent request
+    /// IDs will be kept in memory, while the rest will be discarded.
+    /// More information can be found here: https://github.com/stratum-mining/stratum/pull/904#discussion_r1609469048
+    fn update_last_declare_job_sent(
+        self_mutex: &Arc<Mutex<Self>>,
+        request_id: u32,
+        j: LastDeclareJob,
+    ) {
         self_mutex
-            .safe_lock(|s| s.last_declare_mining_job_sent = Some(j))
-            .unwrap()
+            .safe_lock(|s| {
+                if let Some(empty_index) = s
+                    .last_declare_mining_jobs_sent
+                    .iter()
+                    .position(|entry| entry.is_none())
+                {
+                    s.last_declare_mining_jobs_sent[empty_index] = Some((request_id, j));
+                } else if let Some((min_index, _)) = s
+                    .last_declare_mining_jobs_sent
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, entry)| entry.as_ref().map(|(id, _)| (i, id)))
+                    .min_by_key(|&(_, id)| id)
+                {
+                    s.last_declare_mining_jobs_sent[min_index] = Some((request_id, j));
+                }
+            })
+            .unwrap();
     }
 
     #[async_recursion]
@@ -209,21 +240,23 @@ impl JobDeclarator {
         self_mutex: &Arc<Mutex<Self>>,
         template: NewTemplate<'static>,
         token: Vec<u8>,
-        tx_list_: Seq064K<'static, B016M<'static>>,
+        tx_list: Seq064K<'static, B016M<'static>>,
         excess_data: B064K<'static>,
         coinbase_pool_output: Vec<u8>,
     ) {
         let (id, _, sender) = self_mutex
             .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
             .unwrap();
-        // TODO: create right nonce
-        let tx_short_hash_nonce = 0;
-        let mut tx_list: Vec<Transaction> = Vec::new();
-        for tx in tx_list_.to_vec() {
-            //TODO remove unwrap
-            let tx = Transaction::deserialize(&tx).unwrap();
-            tx_list.push(tx);
+        let mut tx_ids = vec![];
+        for tx in tx_list.to_vec() {
+            let tx: Transaction = consensus::deserialize(&tx).unwrap();
+            let id: U256 = consensus::serialize(&tx.compute_txid())
+                .to_vec()
+                .try_into()
+                .unwrap();
+            tx_ids.push(id);
         }
+        let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
         let declare_job = DeclareMiningJob {
             request_id: id,
             mining_job_token: token.try_into().unwrap(),
@@ -234,18 +267,16 @@ impl JobDeclarator {
             coinbase_suffix: self_mutex
                 .safe_lock(|s| s.coinbase_tx_suffix.clone())
                 .unwrap(),
-            tx_short_hash_nonce,
-            tx_short_hash_list: hash_lists_tuple(tx_list.clone(), tx_short_hash_nonce).0,
-            tx_hash_list_hash: hash_lists_tuple(tx_list.clone(), tx_short_hash_nonce).1,
+            tx_list: tx_ids,
             excess_data, // request transaction data
         };
         let last_declare = LastDeclareJob {
             declare_job: declare_job.clone(),
             template,
             coinbase_pool_output,
-            tx_list: tx_list_.clone(),
+            tx_list,
         };
-        Self::update_last_declare_job_sent(self_mutex, last_declare);
+        Self::update_last_declare_job_sent(self_mutex, id, last_declare);
         let frame: StdFrame =
             PoolMessages::JobDeclaration(JobDeclaration::DeclareMiningJob(declare_job))
                 .try_into()
@@ -272,7 +303,7 @@ impl JobDeclarator {
                     match next_message_to_send {
                         Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobSuccess(m)))) => {
                             let new_token = m.new_mining_job_token;
-                            let last_declare = Self::get_last_declare_job_sent(&self_mutex);
+                            let last_declare = Self::get_last_declare_job_sent(&self_mutex, m.request_id).unwrap_or_else(|| panic!("Failed to get last declare job: job not found, Request Id: {:?}.", m.request_id));
                             let mut last_declare_mining_job_sent = last_declare.declare_job;
                             let is_future = last_declare.template.future_template;
                             let id = last_declare.template.template_id;
@@ -355,21 +386,36 @@ impl JobDeclarator {
     ) {
         tokio::task::spawn(async move {
             let id = set_new_prev_hash.template_id;
+            let _ = self_mutex.safe_lock(|s| {
+                s.last_set_new_prev_hash = Some(set_new_prev_hash.clone());
+                s.set_new_prev_hash_counter += 1;
+            });
             let (job, up, merkle_path, template, mut pool_outs) = loop {
-                if let Some(future_job_tuple) = self_mutex
+                match self_mutex
                     .safe_lock(|s| {
-                        s.last_set_new_prev_hash = Some(set_new_prev_hash.clone());
-                        match s.future_jobs.remove(&id) {
-                            Some((job, merkle_path, template, pool_outs)) => {
-                                s.future_jobs = HashMap::with_hasher(BuildNoHashHasher::default());
-                                Some((job, s.up.clone(), merkle_path, template, pool_outs))
-                            }
-                            None => None,
+                        if s.set_new_prev_hash_counter > 1
+                            && s.last_set_new_prev_hash != Some(set_new_prev_hash.clone())
+                        //it means that a new prev_hash is arrived while the previous hasn't exited
+                        // the loop yet
+                        {
+                            s.set_new_prev_hash_counter -= 1;
+                            Some(None)
+                        } else {
+                            s.future_jobs.remove(&id).map(
+                                |(job, merkle_path, template, pool_outs)| {
+                                    s.future_jobs =
+                                        HashMap::with_hasher(BuildNoHashHasher::default());
+                                    s.set_new_prev_hash_counter -= 1;
+                                    Some((job, s.up.clone(), merkle_path, template, pool_outs))
+                                },
+                            )
                         }
                     })
                     .unwrap()
                 {
-                    break future_job_tuple;
+                    Some(Some(future_job_tuple)) => break future_job_tuple,
+                    Some(None) => return,
+                    None => {}
                 };
                 tokio::task::yield_now().await;
             };
