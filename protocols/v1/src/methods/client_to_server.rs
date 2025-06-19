@@ -18,6 +18,53 @@ use quickcheck::{Arbitrary, Gen};
 #[cfg(test)]
 use quickcheck_macros;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestDifficulty {
+    pub id: u64,
+    pub difficulty: f64,
+}
+
+impl TryFrom<StandardRequest> for SuggestDifficulty {
+    type Error = ParsingMethodError;
+    fn try_from(msg: StandardRequest) -> Result<Self, Self::Error> {
+        match msg.params.as_array() {
+            Some(param) if param.len() == 1 => {
+                let difficulty = match &param[0] {
+                    Value::Number(num) => num
+                        .as_f64()
+                        .ok_or(ParsingMethodError::not_float_from_value(msg.params))?,
+                    _ => return Err(ParsingMethodError::wrong_args_from_value(msg.params)),
+                };
+                Ok(Self {
+                    id: msg.id,
+                    difficulty,
+                })
+            }
+            _ => Err(ParsingMethodError::not_array_from_value(msg.params)),
+        }
+    }
+}
+
+impl From<SuggestDifficulty> for Message {
+    fn from(value: SuggestDifficulty) -> Self {
+        Message::StandardRequest(StandardRequest {
+            id: value.id,
+            method: "mining.suggest_difficulty".into(),
+            params: vec![value.difficulty].into(),
+        })
+    }
+}
+
+impl SuggestDifficulty {
+    pub fn respond(self, is_ok: bool) -> Response {
+        let result = serde_json::to_value(is_ok).unwrap();
+        Response {
+            id: self.id,
+            result,
+            error: None,
+        }
+    }
+}
 /// _mining.authorize("username", "password")_
 ///
 /// The result from an authorize request is usually true (successful), or false.
@@ -655,6 +702,75 @@ impl From<InfoParams> for serde_json::Map<String, Value> {
 }
 
 // mining.suggest_difficulty
+#[test]
+fn test_suggest_difficulty() {
+    let suggest = SuggestDifficulty {
+        id: 2,
+        difficulty: 1000.0,
+    };
+    let message = Message::from(suggest.clone());
+    let request = match message {
+        Message::StandardRequest(s) => s,
+        _ => panic!("Expected StandardRequest"),
+    };
+    let parsed = SuggestDifficulty::try_from(request).unwrap();
+    assert_eq!(suggest.id, parsed.id);
+    assert_eq!(suggest.difficulty, parsed.difficulty);
+}
+
+#[test]
+fn test_suggest_difficulty_respond() {
+    let suggest = SuggestDifficulty {
+        id: 2,
+        difficulty: 1000.0,
+    };
+    let response = suggest.respond(true);
+    assert_eq!(response.id, 2);
+    assert_eq!(response.result, Value::Bool(true));
+    assert!(response.error.is_none());
+}
+
+#[test]
+fn test_suggest_difficulty_with_int() {
+    let client_message = r#"{
+        "id": 3,
+        "method": "mining.suggest_difficulty",
+        "params": [1000]}"#;
+
+    let client_message: StandardRequest = serde_json::from_str(&client_message).unwrap();
+    let parsed_message = SuggestDifficulty::try_from(client_message.clone()).unwrap();
+    assert_eq!(&client_message.id, &parsed_message.id);
+    println!("Client Message: {:?}", client_message);
+    let param = client_message.params[0].as_f64().unwrap();
+    assert_eq!(param, parsed_message.difficulty);
+}
+
+#[test]
+fn test_suggest_difficulty_with_float() {
+    let client_message = r#"{
+        "id": 4,
+        "method": "mining.suggest_difficulty",
+        "params": [100.5]}"#;
+
+    let client_message: StandardRequest = serde_json::from_str(&client_message).unwrap();
+    let parsed_message = SuggestDifficulty::try_from(client_message.clone()).unwrap();
+    assert_eq!(&client_message.id, &parsed_message.id);
+    println!("Client Message: {:?}", client_message);
+    let param = client_message.params[0].as_f64().unwrap();
+    assert_eq!(param, parsed_message.difficulty);
+}
+
+#[test]
+fn test_suggest_difficulty_with_int_literal() {
+    let client_message = r#"{
+        "id": 5,
+        "method": "mining.suggest_difficulty",
+        "params": [1000]}"#;
+    let client_message: StandardRequest = serde_json::from_str(&client_message).unwrap();
+    let parsed_message = SuggestDifficulty::try_from(client_message).unwrap();
+    assert_eq!(parsed_message.id, 5);
+    assert_eq!(parsed_message.difficulty, 1000.0); // Direct float comparison
+}
 
 // mining.suggest_target
 
@@ -716,3 +832,6 @@ fn test_version_extension_with_no_bit_count() {
         _ => panic!(),
     };
 }
+
+#[test]
+fn test_suggest_difficulty_int() {}

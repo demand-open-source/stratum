@@ -238,6 +238,9 @@ impl<'a> IsServer<'a> for Server<'a> {
     fn is_authorized(&self, _name: &str) -> bool {
         true
     }
+    fn handle_suggest_difficulty(&self, _request: &client_to_server::SuggestDifficulty) -> bool {
+        todo!()
+    }
 
     fn authorize(&mut self, name: &str) {
         self.authorized_names.push(name.to_string())
