@@ -4,10 +4,10 @@ use super::{
 };
 use async_channel::{Receiver, Sender};
 use binary_sv2::U256;
-use codec_sv2::{Frame, HandshakeRole, Responder, StandardEitherFrame, StandardSv2Frame};
+use codec_sv2::{HandshakeRole, Responder, StandardEitherFrame, StandardSv2Frame};
 use error_handling::handle_result;
-use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey, SignatureService};
+use network_helpers_sv2::noise_connection::Connection;
 use nohash_hasher::BuildNoHashHasher;
 use roles_logic_sv2::{
     channel_logic::channel_factory::PoolChannelFactory,
@@ -28,7 +28,10 @@ use std::{
     net::SocketAddr,
     sync::Arc,
 };
-use stratum_common::bitcoin::{Script, TxOut};
+use stratum_common::{
+    bitcoin::{Amount, ScriptBuf, TxOut},
+    secp256k1,
+};
 use tokio::{net::TcpListener, task};
 use tracing::{debug, error, info, warn};
 
@@ -45,9 +48,9 @@ pub fn get_coinbase_output(config: &Configuration) -> Result<Vec<TxOut>, Error> 
     let mut result = Vec::new();
     for coinbase_output_pool in &config.coinbase_outputs {
         let coinbase_output: CoinbaseOutput_ = coinbase_output_pool.try_into()?;
-        let output_script: Script = coinbase_output.try_into()?;
+        let output_script: ScriptBuf = coinbase_output.try_into()?;
         result.push(TxOut {
-            value: 0,
+            value: Amount::from_sat(0),
             script_pubkey: output_script,
         });
     }
@@ -61,6 +64,15 @@ pub fn get_coinbase_output(config: &Configuration) -> Result<Vec<TxOut>, Error> 
 pub struct CoinbaseOutput {
     output_script_type: String,
     output_script_value: String,
+}
+
+impl CoinbaseOutput {
+    pub fn new(output_script_type: String, output_script_value: String) -> Self {
+        Self {
+            output_script_type,
+            output_script_value,
+        }
+    }
 }
 
 impl TryFrom<&CoinbaseOutput> for CoinbaseOutput_ {
@@ -91,6 +103,73 @@ pub struct Configuration {
     pub pool_signature: String,
     #[cfg(feature = "test_only_allow_unencrypted")]
     pub test_only_listen_adress_plain: String,
+}
+
+pub struct TemplateProviderConfig {
+    address: String,
+    authority_public_key: Option<Secp256k1PublicKey>,
+}
+
+impl TemplateProviderConfig {
+    pub fn new(address: String, authority_public_key: Option<Secp256k1PublicKey>) -> Self {
+        Self {
+            address,
+            authority_public_key,
+        }
+    }
+}
+
+pub struct AuthorityConfig {
+    pub public_key: Secp256k1PublicKey,
+    pub secret_key: Secp256k1SecretKey,
+}
+
+impl AuthorityConfig {
+    pub fn new(public_key: Secp256k1PublicKey, secret_key: Secp256k1SecretKey) -> Self {
+        Self {
+            public_key,
+            secret_key,
+        }
+    }
+}
+
+pub struct ConnectionConfig {
+    listen_address: String,
+    cert_validity_sec: u64,
+    signature: String,
+}
+
+impl ConnectionConfig {
+    pub fn new(listen_address: String, cert_validity_sec: u64, signature: String) -> Self {
+        Self {
+            listen_address,
+            cert_validity_sec,
+            signature,
+        }
+    }
+}
+
+impl Configuration {
+    pub fn new(
+        pool_connection: ConnectionConfig,
+        template_provider: TemplateProviderConfig,
+        authority_config: AuthorityConfig,
+        coinbase_outputs: Vec<CoinbaseOutput>,
+        #[cfg(feature = "test_only_allow_unencrypted")] test_only_listen_adress_plain: String,
+    ) -> Self {
+        Self {
+            listen_address: pool_connection.listen_address,
+            tp_address: template_provider.address,
+            tp_authority_public_key: template_provider.authority_public_key,
+            authority_public_key: authority_config.public_key,
+            authority_secret_key: authority_config.secret_key,
+            cert_validity_sec: pool_connection.cert_validity_sec,
+            coinbase_outputs,
+            pool_signature: pool_connection.signature,
+            #[cfg(feature = "test_only_allow_unencrypted")]
+            test_only_listen_adress_plain,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -283,18 +362,11 @@ pub fn verify_token(
     signature: secp256k1::schnorr::Signature,
     pub_key: key_utils::Secp256k1PublicKey,
 ) -> Result<(), secp256k1::Error> {
-    let secp = secp256k1::Secp256k1::verification_only();
-    // Create PublicKey instance
-    let x_only_public_key = pub_key.0;
-
     let message: Vec<u8> = tx_hash_list_hash.to_vec();
 
-    // Verify signature
-    let is_verified = secp.verify_schnorr(
-        &signature,
-        &secp256k1::Message::from_digest_slice(&message)?,
-        &x_only_public_key,
-    );
+    let secp = SignatureService::default();
+
+    let is_verified = secp.verify(tx_hash_list_hash.to_vec(), signature, pub_key.0);
 
     // debug
     debug!("Message: {}", std::str::from_utf8(&message).unwrap());
@@ -330,7 +402,7 @@ impl Pool {
             debug!("New connection from {}", address);
 
             let (receiver, sender): (Receiver<EitherFrame>, Sender<EitherFrame>) =
-                network_helpers::plain_connection_tokio::PlainConnection::new(stream).await;
+                network_helpers_sv2::plain_connection_tokio::PlainConnection::new(stream).await;
 
             handle_result!(
                 status_tx,
@@ -525,11 +597,11 @@ impl Pool {
         sender_message_received_signal: Sender<()>,
         status_tx: status::Sender,
     ) -> Arc<Mutex<Self>> {
-        let extranonce_len = 32;
+        let extranonce_len = 13;
         let range_0 = std::ops::Range { start: 0, end: 0 };
-        let range_1 = std::ops::Range { start: 0, end: 16 };
+        let range_1 = std::ops::Range { start: 0, end: 5 };
         let range_2 = std::ops::Range {
-            start: 16,
+            start: 5,
             end: extranonce_len,
         };
         let ids = Arc::new(Mutex::new(roles_logic_sv2::utils::GroupId::new()));
@@ -539,15 +611,18 @@ impl Pool {
         let creator = JobsCreators::new(extranonce_len as u8);
         let share_per_min = 1.0;
         let kind = roles_logic_sv2::channel_logic::channel_factory::ExtendedChannelKind::Pool;
-        let channel_factory = Arc::new(Mutex::new(PoolChannelFactory::new(
-            ids,
-            extranonces,
-            creator,
-            share_per_min,
-            kind,
-            pool_coinbase_outputs.expect("Invalid coinbase output in config"),
-            config.pool_signature.clone(),
-        )));
+        let channel_factory = Arc::new(Mutex::new(
+            PoolChannelFactory::new(
+                ids,
+                extranonces,
+                creator,
+                share_per_min,
+                kind,
+                pool_coinbase_outputs.expect("Invalid coinbase output in config"),
+                config.pool_signature.clone().into_bytes(),
+            )
+            .expect("Signature + extranonce lens exceed 32 bytes"),
+        ));
         let pool = Arc::new(Mutex::new(Pool {
             downstreams: HashMap::with_hasher(BuildNoHashHasher::default()),
             solution_sender,
@@ -650,9 +725,9 @@ impl Pool {
 
     /// This removes the downstream from the list of downstreams
     /// due to a race condition it's possible for downstreams to have been cloned right before
-    /// this remove happens which will cause the cloning task to still attempt to communicate with the
-    /// downstream. This is going to be rare and will won't cause any issues as the attempt to communicate
-    /// will fail but continue with the next downstream.
+    /// this remove happens which will cause the cloning task to still attempt to communicate with
+    /// the downstream. This is going to be rare and will won't cause any issues as the attempt
+    /// to communicate will fail but continue with the next downstream.
     pub fn remove_downstream(&mut self, downstream_id: u32) {
         self.downstreams.remove(&downstream_id);
     }
@@ -661,23 +736,42 @@ impl Pool {
 #[cfg(test)]
 mod test {
     use binary_sv2::{B0255, B064K};
+    use ext_config::{Config, File, FileFormat};
     use std::convert::TryInto;
+    use tracing::error;
 
     use stratum_common::{
         bitcoin,
-        bitcoin::{util::psbt::serialize::Serialize, Transaction, Witness},
+        bitcoin::{absolute::LockTime, consensus, transaction::Version, Transaction, Witness},
     };
 
-    // this test is used to verify the `coinbase_tx_prefix` and `coinbase_tx_suffix` values tested against in
-    // message generator `stratum/test/message-generator/test/pool-sri-test-extended.json`
+    use super::Configuration;
+
+    // this test is used to verify the `coinbase_tx_prefix` and `coinbase_tx_suffix` values tested
+    // against in message generator
+    // `stratum/test/message-generator/test/pool-sri-test-extended.json`
     #[test]
     fn test_coinbase_outputs_from_config() {
+        let config_path = "./config-examples/pool-config-local-tp-example.toml";
+
         // Load config
-        let config: super::Configuration = toml::from_str(
-            &std::fs::read_to_string("./config-examples/pool-config-local-tp-example.toml")
-                .unwrap(),
-        )
-        .unwrap();
+        let config: Configuration = match Config::builder()
+            .add_source(File::new(&config_path, FileFormat::Toml))
+            .build()
+        {
+            Ok(settings) => match settings.try_deserialize::<Configuration>() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to deserialize config: {}", e);
+                    return;
+                }
+            },
+            Err(e) => {
+                error!("Failed to build config: {}", e);
+                return;
+            }
+        };
+
         // template from message generator test (mock TP template)
         let _extranonce_len = 3;
         let coinbase_prefix = vec![3, 76, 163, 38, 0];
@@ -698,8 +792,8 @@ mod test {
         bip34_bytes.extend_from_slice(config.pool_signature.as_bytes());
         bip34_bytes.extend_from_slice(&vec![0; extranonce_len as usize]);
         let witness = match bip34_bytes.len() {
-            0 => Witness::from_vec(vec![]),
-            _ => Witness::from_vec(vec![vec![0; 32]]),
+            0 => Witness::from(vec![] as Vec<Vec<u8>>),
+            _ => Witness::from(vec![vec![0; 32]]),
         };
 
         let tx_in = bitcoin::TxIn {
@@ -708,9 +802,9 @@ mod test {
             sequence: bitcoin::Sequence(coinbase_tx_input_sequence),
             witness,
         };
-        let coinbase = bitcoin::Transaction {
-            version: coinbase_tx_version,
-            lock_time: bitcoin::PackedLockTime(coinbase_tx_locktime),
+        let coinbase = Transaction {
+            version: Version::non_standard(coinbase_tx_version),
+            lock_time: LockTime::from_consensus(coinbase_tx_locktime),
             input: vec![tx_in],
             output: coinbase_tx_outputs,
         };
@@ -748,9 +842,9 @@ mod test {
 
     // copied from roles-logic-sv2::job_creator
     fn coinbase_tx_prefix(coinbase: &Transaction, script_prefix_len: usize) -> B064K<'static> {
-        let encoded = coinbase.serialize();
-        // If script_prefix_len is not 0 we are not in a test enviornment and the coinbase have the 0
-        // witness
+        let encoded = consensus::serialize(coinbase);
+        // If script_prefix_len is not 0 we are not in a test enviornment and the coinbase have the
+        // 0 witness
         let segwit_bytes = match script_prefix_len {
             0 => 0,
             _ => 2,
@@ -772,9 +866,9 @@ mod test {
         extranonce_len: u8,
         script_prefix_len: usize,
     ) -> B064K<'static> {
-        let encoded = coinbase.serialize();
-        // If script_prefix_len is not 0 we are not in a test enviornment and the coinbase have the 0
-        // witness
+        let encoded = consensus::serialize(coinbase);
+        // If script_prefix_len is not 0 we are not in a test enviornment and the coinbase have the
+        // 0 witness
         let segwit_bytes = match script_prefix_len {
             0 => 0,
             _ => 2,

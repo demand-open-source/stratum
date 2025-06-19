@@ -2,19 +2,21 @@ pub mod message_handler;
 use super::{error::JdsError, mempool::JDsMempool, status, Configuration, EitherFrame, StdFrame};
 use async_channel::{Receiver, Sender};
 use binary_sv2::{B0255, U256};
-use codec_sv2::{Frame, HandshakeRole, Responder};
+use codec_sv2::{HandshakeRole, Responder};
+use core::panic;
 use error_handling::handle_result;
-use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
-use network_helpers_sv2::noise_connection_tokio::Connection;
+use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey, SignatureService};
+use network_helpers_sv2::noise_connection::Connection;
 use nohash_hasher::BuildNoHashHasher;
 use roles_logic_sv2::{
-    common_messages_sv2::SetupConnectionSuccess,
+    common_messages_sv2::{
+        Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
+    },
     handlers::job_declaration::{ParseClientJobDeclarationMessages, SendTo},
     job_declaration_sv2::{DeclareMiningJob, SubmitSolutionJd},
     parsers::{JobDeclaration, PoolMessages as JdsMessages},
     utils::{Id, Mutex},
 };
-use secp256k1::{Keypair, Message as SecpMessage, Secp256k1};
 use std::{collections::HashMap, convert::TryInto, sync::Arc};
 use tokio::{net::TcpListener, time::Duration};
 use tracing::{debug, error, info};
@@ -45,6 +47,7 @@ pub struct AddTrasactionsToMempool {
 
 #[derive(Debug)]
 pub struct JobDeclaratorDownstream {
+    async_mining_allowed: bool,
     sender: Sender<EitherFrame>,
     receiver: Receiver<EitherFrame>,
     // TODO this should be computed for each new template so that fees are included
@@ -62,12 +65,12 @@ pub struct JobDeclaratorDownstream {
         Vec<TransactionState>,
         Vec<u16>,
     ),
-    tx_hash_list_hash: Option<U256<'static>>,
     add_txs_to_mempool: AddTrasactionsToMempool,
 }
 
 impl JobDeclaratorDownstream {
     pub fn new(
+        async_mining_allowed: bool,
         receiver: Receiver<EitherFrame>,
         sender: Sender<EitherFrame>,
         config: &Configuration,
@@ -87,6 +90,7 @@ impl JobDeclaratorDownstream {
             .expect("Invalid coinbase output in config");
 
         Self {
+            async_mining_allowed,
             receiver,
             sender,
             coinbase_output,
@@ -96,7 +100,6 @@ impl JobDeclaratorDownstream {
             private_key: config.authority_secret_key,
             mempool,
             declared_mining_job: (None, Vec::new(), Vec::new()),
-            tx_hash_list_hash: None,
             add_txs_to_mempool: AddTrasactionsToMempool {
                 add_txs_to_mempool_inner,
                 sender_add_txs_to_mempool,
@@ -140,7 +143,7 @@ impl JobDeclaratorDownstream {
                     .ok_or(Box::new(JdsError::ImpossibleToReconstructBlock(
                         "Txid found in jds mempool but transactions not present".to_string(),
                     )))?;
-                transactions_list.push(tx);
+                transactions_list.push(tx.0);
             } else {
                 return Err(Box::new(JdsError::ImpossibleToReconstructBlock(
                     "Unknown transaction".to_string(),
@@ -176,8 +179,10 @@ impl JobDeclaratorDownstream {
         for transaction in job_transactions {
             match transaction {
                 TransactionState::PresentInMempool(txid) => known_transactions.push(txid),
-                TransactionState::Missing => continue,
-            };
+                TransactionState::Missing => {
+                    continue;
+                }
+            }
         }
         known_transactions
     }
@@ -222,35 +227,28 @@ impl JobDeclaratorDownstream {
                         //    of declared job with the full transaction (with send_tx_to_mempool
                         //    method(), that eventually will ask the transactions to a bitcoin node
                         //    via RPC)
-                        // 2. there are some unknown txids. Just before sending PMT, the JDS
-                        //    mempool is triggered to fill the known txids with the full
-                        //    transactions. When a PMTS arrives, just before sending a DMJS, the
-                        //    unknown full transactions provided by the downstream are added to the
-                        //    JDS mempool
+                        // 2. there are some unknown txids. Just before sending PMT, the JDS mempool
+                        //    is triggered to fill the known txids with the full transactions. When
+                        //    a PMTS arrives, just before sending a DMJS, the unknown full
+                        //    transactions provided by the downstream are added to the JDS mempool
                         match next_message_to_send {
                             Ok(SendTo::Respond(m)) => {
                                 match m {
                                     JobDeclaration::AllocateMiningJobToken(_) => {
-                                        error!("Send unexpected message: AMJT")
+                                        error!("Send unexpected message: AMJT");
                                     }
                                     JobDeclaration::AllocateMiningJobTokenSuccess(_) => {
-                                        debug!("Send message: AMJTS")
+                                        debug!("Send message: AMJTS");
                                     }
                                     JobDeclaration::DeclareMiningJob(_) => {
                                         error!("Send unexpected message: DMJ");
                                     }
                                     JobDeclaration::DeclareMiningJobError(_) => {
-                                        debug!("Send nmessage: DMJE")
+                                        debug!("Send nmessage: DMJE");
                                     }
                                     JobDeclaration::DeclareMiningJobSuccess(_) => {
                                         debug!("Send message: DMJS. Updating the JDS mempool.");
                                         Self::send_txs_to_mempool(self_mutex.clone()).await;
-                                    }
-                                    JobDeclaration::IdentifyTransactions(_) => {
-                                        debug!("Send  message: IT")
-                                    }
-                                    JobDeclaration::IdentifyTransactionsSuccess(_) => {
-                                        error!("Send unexpected message: ITS")
                                     }
                                     JobDeclaration::ProvideMissingTransactions(_) => {
                                         debug!("Send message: PMT. Updating the JDS mempool.");
@@ -267,10 +265,17 @@ impl JobDeclaratorDownstream {
                                 error!("JD Server: unexpected relay new message {:?}", message);
                             }
                             Ok(SendTo::RelayNewMessageToRemote(remote, message)) => {
-                                error!("JD Server: unexpected relay new message to remote. Remote: {:?}, Message: {:?}", remote, message);
+                                error!(
+                                    "JD Server: unexpected relay new message to remote. Remote: {:?}, Message: {:?}",
+                                    remote,
+                                    message
+                                );
                             }
                             Ok(SendTo::RelaySameMessageToRemote(remote)) => {
-                                error!("JD Server: unexpected relay same message to remote. Remote: {:?}", remote);
+                                error!(
+                                    "JD Server: unexpected relay same message to remote. Remote: {:?}",
+                                    remote
+                                );
                             }
                             Ok(SendTo::Multiple(multiple)) => {
                                 error!("JD Server: unexpected multiple messages: {:?}", multiple);
@@ -280,7 +285,9 @@ impl JobDeclaratorDownstream {
                                     Some(JobDeclaration::SubmitSolution(message)) => {
                                         match Self::collect_txs_in_job(self_mutex.clone()) {
                                             Ok(_) => {
-                                                info!("All transactions in downstream job are recognized correctly by the JD Server");
+                                                info!(
+                                                    "All transactions in downstream job are recognized correctly by the JD Server"
+                                                );
                                                 let hexdata =
                                                     match JobDeclaratorDownstream::get_block_hex(
                                                         self_mutex.clone(),
@@ -289,9 +296,9 @@ impl JobDeclaratorDownstream {
                                                         Ok(inner) => inner,
                                                         Err(e) => {
                                                             error!(
-                                                                "Received solution but encountered error: {:?}",
-                                                                e
-                                                            );
+                                                            "Received solution but encountered error: {:?}",
+                                                            e
+                                                        );
                                                             recv.close();
                                                             //TODO should we brake it?
                                                             break;
@@ -304,7 +311,7 @@ impl JobDeclaratorDownstream {
                                                 // TODO print here the ip of the downstream
                                                 let known_transactions =
                                                     JobDeclaratorDownstream::get_transactions_in_job(
-                                                        self_mutex.clone(),
+                                                        self_mutex.clone()
                                                     );
                                                 let retrieve_transactions =
                                                     AddTrasactionsToMempoolInner {
@@ -317,25 +324,23 @@ impl JobDeclaratorDownstream {
                                                     .unwrap();
                                                 tokio::select! {
                                                     _ = JDsMempool::add_tx_data_to_mempool(mempool, retrieve_transactions) => {
-                                                        let hexdata = match JobDeclaratorDownstream::get_block_hex(
+                                                        match JobDeclaratorDownstream::get_block_hex(
                                                             self_mutex.clone(),
                                                             message.clone(),
                                                         ) {
-                                                            Ok(inner) => inner,
+                                                            Ok(hexdata) => {
+                                                                let _ = new_block_sender.send(hexdata).await;
+                                                            },
                                                             Err(e) => {
-                                                                error!(
-                                                                    "Error retrieving transactions: {:?}",
-                                                                    e
+                                                                handle_result!(
+                                                                    tx_status,
+                                                                    Err(*e)
                                                                 );
-                                                                recv.close();
-                                                                //TODO should we brake it?
-                                                                break;
                                                             }
                                                         };
-                                                        let _ = new_block_sender.send(hexdata).await;
                                                     }
                                                     _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-                                                };
+                                                }
                                             }
                                         };
                                     }
@@ -346,12 +351,6 @@ impl JobDeclaratorDownstream {
                                         error!("JD Server received an unexpected message {:?}", m);
                                     }
                                     Some(JobDeclaration::DeclareMiningJobError(_)) => {
-                                        error!("JD Server received an unexpected message {:?}", m);
-                                    }
-                                    Some(JobDeclaration::IdentifyTransactions(_)) => {
-                                        error!("JD Server received an unexpected message {:?}", m);
-                                    }
-                                    Some(JobDeclaration::IdentifyTransactionsSuccess(_)) => {
                                         error!("JD Server received an unexpected message {:?}", m);
                                     }
                                     Some(JobDeclaration::AllocateMiningJobToken(_)) => {
@@ -395,15 +394,9 @@ pub fn signed_token(
     _pub_key: &Secp256k1PublicKey,
     prv_key: &Secp256k1SecretKey,
 ) -> B0255<'static> {
-    let secp = Secp256k1::signing_only();
+    let secp = SignatureService::default();
 
-    // Create the SecretKey and PublicKey instances
-    let secret_key = prv_key.0;
-    let kp = Keypair::from_secret_key(&secp, &secret_key);
-
-    let message: Vec<u8> = tx_hash_list_hash.to_vec();
-
-    let signature = secp.sign_schnorr(&SecpMessage::from_digest_slice(&message).unwrap(), &kp);
+    let signature = secp.sign(tx_hash_list_hash.to_vec(), prv_key.0);
 
     // Sign message
     signature.as_ref().to_vec().try_into().unwrap()
@@ -444,54 +437,98 @@ impl JobDeclarator {
         new_block_sender: Sender<String>,
         sender_add_txs_to_mempool: Sender<AddTrasactionsToMempoolInner>,
     ) {
-        let listner = TcpListener::bind(&config.listen_jd_address).await.unwrap();
-        while let Ok((stream, _)) = listner.accept().await {
+        let listener = TcpListener::bind(&config.listen_jd_address).await.unwrap();
+
+        while let Ok((stream, _)) = listener.accept().await {
             let responder = Responder::from_authority_kp(
                 &config.authority_public_key.into_bytes(),
                 &config.authority_secret_key.into_bytes(),
                 std::time::Duration::from_secs(config.cert_validity_sec),
             )
             .unwrap();
+
             let addr = stream.peer_addr();
 
             if let Ok((receiver, sender, _, _)) =
                 Connection::new(stream, HandshakeRole::Responder(responder)).await
             {
-                let setup_message_from_proxy_jd = receiver.recv().await.unwrap();
-                info!(
-                    "Setup connection message from proxy: {:?}",
-                    setup_message_from_proxy_jd
-                );
+                match receiver.recv().await {
+                    Ok(EitherFrame::Sv2(mut sv2_message)) => {
+                        debug!("Received SV2 message: {:?}", sv2_message);
+                        let payload = sv2_message.payload();
 
-                let setup_connection_success_to_proxy = SetupConnectionSuccess {
-                    used_version: 2,
-                    // Setup flags for async_mining_allowed
-                    flags: 0b_0000_0000_0000_0000_0000_0000_0000_0001,
-                };
-                let sv2_frame: StdFrame =
-                    JdsMessages::Common(setup_connection_success_to_proxy.into())
-                        .try_into()
-                        .unwrap();
-                let sv2_frame = sv2_frame.into();
-                info!("Sending success message for proxy");
-                sender.send(sv2_frame).await.unwrap();
+                        if let Ok(setup_connection) =
+                            binary_sv2::from_bytes::<SetupConnection>(payload)
+                        {
+                            let flag = setup_connection.flags;
+                            let is_valid = SetupConnection::check_flags(
+                                Protocol::JobDeclarationProtocol,
+                                config.async_mining_allowed as u32,
+                                flag,
+                            );
 
-                let jddownstream = Arc::new(Mutex::new(JobDeclaratorDownstream::new(
-                    receiver.clone(),
-                    sender.clone(),
-                    &config,
-                    mempool.clone(),
-                    // each downstream has its own sender (multi producer single consumer)
-                    sender_add_txs_to_mempool.clone(),
-                )));
+                            if is_valid {
+                                let success_message = SetupConnectionSuccess {
+                                    used_version: 2,
+                                    flags: (setup_connection.flags & 1u32),
+                                };
+                                info!("Sending success message for proxy");
+                                let sv2_frame: StdFrame = JdsMessages::Common(success_message.into())
+        .try_into()
+        .expect("Failed to convert setup connection response message to standard frame");
 
-                JobDeclaratorDownstream::start(
-                    jddownstream,
-                    status_tx.clone(),
-                    new_block_sender.clone(),
-                );
+                                sender.send(sv2_frame.into()).await.unwrap();
+
+                                let jddownstream = Arc::new(Mutex::new(
+                                    JobDeclaratorDownstream::new(
+                                        (setup_connection.flags & 1u32) != 0u32, /* this takes a
+                                                                                  * bool instead
+                                                                                  * of u32 */
+                                        receiver.clone(),
+                                        sender.clone(),
+                                        &config,
+                                        mempool.clone(),
+                                        sender_add_txs_to_mempool.clone(), /* each downstream has its own sender (multi producer single consumer) */
+                                    ),
+                                ));
+
+                                JobDeclaratorDownstream::start(
+                                    jddownstream,
+                                    status_tx.clone(),
+                                    new_block_sender.clone(),
+                                );
+                            } else {
+                                let error_message = SetupConnectionError {
+                                    flags: flag,
+                                    error_code: "unsupported-feature-flags"
+                                        .to_string()
+                                        .into_bytes()
+                                        .try_into()
+                                        .unwrap(),
+                                };
+                                info!("Sending error message for proxy");
+                                let sv2_frame: StdFrame = JdsMessages::Common(error_message.into())
+        .try_into()
+        .expect("Failed to convert setup connection response message to standard frame");
+
+                                sender.send(sv2_frame.into()).await.unwrap();
+                            }
+                        } else {
+                            error!("Error parsing SetupConnection message");
+                        }
+                    }
+                    Ok(EitherFrame::HandShake(handshake_message)) => {
+                        error!(
+                            "Unexpected handshake message from upstream: {:?} at {:?}",
+                            handshake_message, addr
+                        );
+                    }
+                    Err(e) => {
+                        error!("Error receiving message: {:?}", e);
+                    }
+                }
             } else {
-                error!("Can not connect {:?}", addr);
+                error!("Cannot connect to {:?}", addr);
             }
         }
     }

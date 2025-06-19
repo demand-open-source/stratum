@@ -1,3 +1,7 @@
+//! # Error Handling
+//!
+//! This module defines error types and utilities for handling errors in the `framing_sv2` module.
+
 // use crate::framing2::EitherFrame;
 use core::fmt;
 
@@ -5,6 +9,7 @@ use core::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
+    /// Binary Sv2 data format error.
     BinarySv2Error(binary_sv2::Error),
     ExpectedHandshakeFrame,
     ExpectedSv2Frame,
@@ -24,8 +29,13 @@ impl fmt::Display for Error {
             ExpectedSv2Frame => {
                 write!(f, "Expected `Sv2Frame`, received `HandshakeFrame`")
             }
-            UnexpectedHeaderLength(i) => {
-                write!(f, "Unexpected `Header` length: `{}`", i)
+            UnexpectedHeaderLength(actual_size) => {
+                write!(
+                    f,
+                    "Unexpected `Header` length: `{}`, should be equal or more to {}",
+                    actual_size,
+                    const_sv2::SV2_FRAME_HEADER_SIZE
+                )
             }
         }
     }

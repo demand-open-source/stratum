@@ -1,10 +1,9 @@
-#![cfg(not(feature = "with_serde"))]
 use std::{
     fmt,
     fmt::{Display, Formatter},
 };
 
-use codec_sv2::{Encoder, Frame, StandardDecoder, StandardSv2Frame};
+use codec_sv2::{Encoder, StandardDecoder, StandardSv2Frame};
 use common_messages_sv2::{
     CSetupConnection, CSetupConnectionError, ChannelEndpointChanged, SetupConnection,
     SetupConnectionError, SetupConnectionSuccess,
@@ -388,7 +387,7 @@ pub extern "C" fn new_encoder() -> *mut EncoderWrapper {
 pub extern "C" fn flush_encoder(encoder: *mut EncoderWrapper) {
     let mut encoder = unsafe { Box::from_raw(encoder) };
     encoder.free = true;
-    Box::into_raw(encoder);
+    let _ = Box::into_raw(encoder);
 }
 
 fn encode_(
@@ -422,7 +421,6 @@ pub extern "C" fn free_decoder(decoder: *mut DecoderWrapper) {
 }
 
 /// # Safety
-///
 #[no_mangle]
 pub unsafe extern "C" fn encode(
     message: &'static mut CSv2Message,
@@ -432,7 +430,7 @@ pub unsafe extern "C" fn encode(
     if encoder.free {
         let result = encode_(message, &mut encoder);
         encoder.free = false;
-        Box::into_raw(encoder);
+        let _ = Box::into_raw(encoder);
         result.into()
     } else {
         CResult::Err(Sv2Error::EncoderBusy)
@@ -454,7 +452,7 @@ pub extern "C" fn get_writable(decoder: *mut DecoderWrapper) -> CVec {
     let mut decoder = unsafe { Box::from_raw(decoder) };
     let writable = decoder.0.writable();
     let res = CVec::as_shared_buffer(writable);
-    Box::into_raw(decoder);
+    let _ = Box::into_raw(decoder);
     res
 }
 
@@ -473,7 +471,7 @@ pub extern "C" fn next_frame(decoder: *mut DecoderWrapper) -> CResult<CSv2Messag
             let len = payload.len();
             let ptr = payload.as_mut_ptr();
             let payload = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-            Box::into_raw(decoder);
+            let _ = Box::into_raw(decoder);
             (msg_type, payload)
                 .try_into()
                 .map(|x: Sv2Message| x.into())
@@ -481,7 +479,7 @@ pub extern "C" fn next_frame(decoder: *mut DecoderWrapper) -> CResult<CSv2Messag
                 .into()
         }
         Err(_) => {
-            Box::into_raw(decoder);
+            let _ = Box::into_raw(decoder);
             CResult::Err(Sv2Error::MissingBytes)
         }
     }

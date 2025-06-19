@@ -1,23 +1,20 @@
+//! # Stratum V2 Template Distribution Protocol Messages Crate
+//!
+//!
+//! `template_distribution_sv2` is a Rust crate that implements a set of messages defined in the
+//! Template Distribution Protocol of Stratum V2. The Template Distribution protocol can be used
+//! to receive updates of the block templates to use in mining.
+//!
+//! ## Build Options
+//! This crate can be built with the following features:
+//! - `std`: Enables support for standard library features.
+//! - `prop_test`: Enables support for property testing.
+//!
+//! For further information about the messages, please refer to [Stratum V2 documentation - Job
+//! Distribution](https://stratumprotocol.org/specification/07-Template-Distribution-Protocol/).
+
 #![no_std]
 
-//! # Template Distribution Protocol
-//! The Template Distribution protocol is used to receive updates of the block template to use in
-//! mining the next block. It effectively replaces BIPs [22] and [23] (getblocktemplate) and provides
-//! a much more efficient API which allows Bitcoin Core (or some other full node software) to push
-//! template updates at more appropriate times as well as provide a template which may be
-//! mined on quickly for the block-after-next. While not recommended, the template update
-//! protocol can be a remote server, and is thus authenticated and signed in the same way as all
-//! other protocols ([using the same SetupConnection handshake]).
-//! Like the [Job Declaration] and [Job Distribution] (sub)protocols, all Template Distribution messages
-//! have the channel_msg bit unset, and there is no concept of channels. After the initial common
-//! handshake, the client MUST immediately send a [`CoinbaseOutputDataSize`] message to indicate
-//! the space it requires for coinbase output addition, to which the server MUST immediately reply
-//! with the current best block template it has available to the client. Thereafter, the server
-//! SHOULD push new block templates to the client whenever the total fee in the current block
-//! template increases materially, and MUST send updated block templates whenever it learns of
-//! a new block.
-//! Template Providers MUST attempt to broadcast blocks which are mined using work they
-//! provided, and thus MUST track the work which they provided to clients.
 extern crate alloc;
 
 #[cfg(feature = "prop_test")]
@@ -32,30 +29,24 @@ mod new_template;
 mod request_transaction_data;
 mod set_new_prev_hash;
 mod submit_solution;
-//
-pub use coinbase_output_data_size::CoinbaseOutputDataSize;
-#[cfg(not(feature = "with_serde"))]
-pub use new_template::CNewTemplate;
-pub use new_template::NewTemplate;
-#[cfg(not(feature = "with_serde"))]
-pub use request_transaction_data::{CRequestTransactionDataError, CRequestTransactionDataSuccess};
-pub use request_transaction_data::{
-    RequestTransactionData, RequestTransactionDataError, RequestTransactionDataSuccess,
-};
-#[cfg(not(feature = "with_serde"))]
-pub use set_new_prev_hash::CSetNewPrevHash;
-pub use set_new_prev_hash::SetNewPrevHash;
-#[cfg(not(feature = "with_serde"))]
-pub use submit_solution::CSubmitSolution;
-pub use submit_solution::SubmitSolution;
 
+pub use coinbase_output_data_size::CoinbaseOutputDataSize;
+pub use new_template::{CNewTemplate, NewTemplate};
+pub use request_transaction_data::{
+    CRequestTransactionDataError, CRequestTransactionDataSuccess, RequestTransactionData,
+    RequestTransactionDataError, RequestTransactionDataSuccess,
+};
+pub use set_new_prev_hash::{CSetNewPrevHash, SetNewPrevHash};
+pub use submit_solution::{CSubmitSolution, SubmitSolution};
+
+/// Exports the [`CoinbaseOutputDataSize`] struct to C.
 #[no_mangle]
 pub extern "C" fn _c_export_coinbase_out(_a: CoinbaseOutputDataSize) {}
 
+/// Exports the [`RequestTransactionData`] struct to C.
 #[no_mangle]
 pub extern "C" fn _c_export_req_tx_data(_a: RequestTransactionData) {}
 
-#[cfg(not(feature = "with_serde"))]
 #[cfg(feature = "prop_test")]
 impl NewTemplate<'static> {
     pub fn from_gen(g: &mut Gen) -> Self {
@@ -123,7 +114,6 @@ impl RequestTransactionDataError<'static> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 #[cfg(feature = "prop_test")]
 impl RequestTransactionDataSuccess<'static> {
     pub fn from_gen(g: &mut Gen) -> Self {
@@ -140,7 +130,6 @@ impl RequestTransactionDataSuccess<'static> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 #[cfg(feature = "prop_test")]
 impl SetNewPrevHash<'static> {
     pub fn from_gen(g: &mut Gen) -> Self {

@@ -1,64 +1,68 @@
-#[cfg(not(feature = "with_serde"))]
 use alloc::vec::Vec;
-#[cfg(not(feature = "with_serde"))]
 use binary_sv2::{
-    binary_codec_sv2, binary_codec_sv2::CVec, decodable::DecodableField, decodable::FieldMarker,
-    free_vec, Error,
+    binary_codec_sv2,
+    binary_codec_sv2::CVec,
+    decodable::{DecodableField, FieldMarker},
+    free_vec, Deserialize, Error, GetSize, Serialize, Str0255,
 };
-use binary_sv2::{Deserialize, GetSize, Serialize, Str0255};
 use const_sv2::{
-    SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT, SV2_JOB_NEG_PROTOCOL_DISCRIMINANT,
-    SV2_MINING_PROTOCOL_DISCRIMINANT, SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT,
+    SV2_JOB_DECLARATION_PROTOCOL_DISCRIMINANT, SV2_MINING_PROTOCOL_DISCRIMINANT,
+    SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT,
 };
-use core::convert::TryFrom;
-#[cfg(not(feature = "with_serde"))]
-use core::convert::TryInto;
-#[cfg(feature = "with_serde")]
-use serde_repr::*;
+use core::convert::{TryFrom, TryInto};
 
-/// ## SetupConnection (Client -> Server)
-/// Initiates the connection. This MUST be the first message sent by the client on the newly
-/// opened connection. Server MUST respond with either a [`SetupConnectionSuccess`] or
-/// [`SetupConnectionError`] message. Clients that are not configured to provide telemetry data to
-/// the upstream node SHOULD set device_id to 0-length strings. However, they MUST always set
-/// vendor to a string describing the manufacturer/developer and firmware version and SHOULD
-/// always set hardware_version to a string describing, at least, the particular hardware/software
-/// package in use.
+/// Used by downstream to initiate a Stratum V2 connection with an upstream role.
 ///
+/// This is usually the first message sent by a downstream role on a newly opened connection,
+/// after completing the handshake process.
+///
+/// Downstreams that do not wish to provide telemetry data to the upstream role **should** set
+/// [`SetupConnection::device_id`] to an empty string. However, they **must** set
+/// [`SetupConnection::vendor`] to a string describing the manufacturer/developer and firmware
+/// version and **should** set [`SetupConnection::hardware_version`] to a string describing, at
+/// least, the particular hardware/software package in use.
+///
+/// A valid response to this message from the upstream role can either be [`SetupConnectionSuccess`]
+/// or [`SetupConnectionError`] message.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SetupConnection<'decoder> {
-    /// [`Protocol`]
+    /// Protocol to be used for the connection.
     pub protocol: Protocol,
-    /// The minimum protocol version the client supports (currently must be 2).
+    /// The minimum protocol version supported.
+    ///
+    /// Currently must be set to 2.
     pub min_version: u16,
-    /// The maximum protocol version the client supports (currently must be 2).
+    /// The maximum protocol version supported.
+    ///
+    /// Currently must be set to 2.
     pub max_version: u16,
-    /// Flags indicating optional protocol features the client supports. Each
-    /// protocol from [`SetupConnection.protocol`] field has its own values/flags.
+    /// Flags indicating optional protocol features supported by the downstream.
+    ///
+    /// Each [`SetupConnection::protocol`] value has it's own flags.
     pub flags: u32,
-    /// ASCII text indicating the hostname or IP address.
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+    /// ASCII representation of the connection hostname or IP address.
     pub endpoint_host: Str0255<'decoder>,
-    /// Connecting port value
+    /// Connection port value.
     pub endpoint_port: u16,
-    //-- DEVICE INFORMATION --//
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+    /// Device vendor name.
     pub vendor: Str0255<'decoder>,
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+    /// Device hardware version.
     pub hardware_version: Str0255<'decoder>,
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+    /// Device firmware version.
     pub firmware: Str0255<'decoder>,
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+    /// Device identifier.
     pub device_id: Str0255<'decoder>,
 }
 
 impl<'decoder> SetupConnection<'decoder> {
+    /// Set the flag to indicate that the downstream requires a standard job
     pub fn set_requires_standard_job(&mut self) {
-        self.flags |= 0b_0000_0000_0000_0000_0000_0000_0000_0001
+        self.flags |= 0b_0000_0000_0000_0000_0000_0000_0000_0001;
     }
 
+    /// Set the flag to indicate that the downstream requires an asynchronous job negotiation
     pub fn set_async_job_nogotiation(&mut self) {
-        self.flags |= 0b_0000_0000_0000_0000_0000_0000_0000_0001
+        self.flags |= 0b_0000_0000_0000_0000_0000_0000_0000_0001;
     }
 
     /// Check if passed flags support self flag
@@ -69,13 +73,25 @@ impl<'decoder> SetupConnection<'decoder> {
             // [1] [1] -> true
             // [0] [1] -> false
             Protocol::MiningProtocol => {
+                // Evaluates protocol requirements based on flag bits.
+                //
+                // Checks if the current protocol meets the required flags for work selection and
+                // version rolling by reversing the bits of `available_flags` and
+                // `required_flags`. It extracts the 30th and 29th bits to determine
+                // if work selection and version rolling are needed.
+                //
+                // Returns `true` if:
+                // - The work selection requirement is satisfied or not needed.
+                // - The version rolling requirement is satisfied or not needed.
+                //
+                // Otherwise, returns `false`.
                 let available = available_flags.reverse_bits();
                 let required_flags = required_flags.reverse_bits();
-                let requires_work_selection_passed = (required_flags >> 30) > 0;
-                let requires_version_rolling_passed = (required_flags >> 29) > 0;
+                let requires_work_selection_passed = required_flags >> 30 > 0;
+                let requires_version_rolling_passed = required_flags >> 29 > 0;
 
-                let requires_work_selection_self = (available >> 30) > 0;
-                let requires_version_rolling_self = (available >> 29) > 0;
+                let requires_work_selection_self = available >> 30 > 0;
+                let requires_version_rolling_self = available >> 29 > 0;
 
                 let work_selection =
                     !requires_work_selection_self || requires_work_selection_passed;
@@ -84,12 +100,43 @@ impl<'decoder> SetupConnection<'decoder> {
 
                 work_selection && version_rolling
             }
-            // TODO
-            _ => todo!(),
+            Protocol::JobDeclarationProtocol => {
+                // Determines if asynchronous job mining is required based on flag bits.
+                //
+                // Reverses the bits of `available_flags` and `required_flags`, extracts the 31st
+                // bit from each, and evaluates if the condition is met using these
+                // bits. Returns `true` or `false` based on:
+                // - True if `requires_async_job_mining_self` is true, or both are true.
+                // - False if `requires_async_job_mining_self` is false and
+                //   `requires_async_job_mining_passed` is true.
+                // - True otherwise.
+                let available = available_flags.reverse_bits();
+                let required = required_flags.reverse_bits();
+
+                let requires_async_job_mining_passed = (required >> 31) & 1 > 0;
+                let requires_async_job_mining_self = (available >> 31) & 1 > 0;
+
+                match (
+                    requires_async_job_mining_self,
+                    requires_async_job_mining_passed,
+                ) {
+                    (true, true) => true,
+                    (true, false) => true,
+                    (false, true) => false,
+                    (false, false) => true,
+                }
+            }
+            Protocol::TemplateDistributionProtocol => {
+                // These protocols do not define flags for setting up a connection.
+                false
+            }
         }
     }
 
-    /// Check if passed versions support self versions if yes return the biggest version available
+    /// Check whether received versions are supported.
+    ///
+    /// If the versions are not supported, return `None` otherwise return the biggest version
+    /// available
     pub fn get_version(&self, min_version: u16, max_version: u16) -> Option<u16> {
         if self.min_version > max_version || min_version > self.max_version {
             None
@@ -98,22 +145,28 @@ impl<'decoder> SetupConnection<'decoder> {
         }
     }
 
+    /// Checks whether passed flags indicate that the downstream requires standard job.
     pub fn requires_standard_job(&self) -> bool {
         has_requires_std_job(self.flags)
     }
 }
 
+/// Helper function to check if `REQUIRES_STANDARD_JOBS` bit flag present.
 pub fn has_requires_std_job(flags: u32) -> bool {
     let flags = flags.reverse_bits();
     let flag = flags >> 31;
     flag != 0
 }
+
+/// Helper function to check if `REQUIRES_VERSION_ROLLING` bit flag present.
 pub fn has_version_rolling(flags: u32) -> bool {
     let flags = flags.reverse_bits();
     let flags = flags << 1;
     let flag = flags >> 31;
     flag != 0
 }
+
+/// Helper function to check if `REQUIRES_WORK_SELECTION` bit flag present.
 pub fn has_work_selection(flags: u32) -> bool {
     let flags = flags.reverse_bits();
     let flags = flags << 2;
@@ -121,26 +174,41 @@ pub fn has_work_selection(flags: u32) -> bool {
     flag != 0
 }
 
+/// C representation of [`SetupConnection`]
 #[repr(C)]
-#[cfg(not(feature = "with_serde"))]
 #[derive(Debug, Clone)]
 pub struct CSetupConnection {
+    /// Protocol to be used for the connection.
     pub protocol: Protocol,
+    /// The minimum protocol version supported.
+    ///
+    /// Currently must be set to 2.
     pub min_version: u16,
+    /// The maximum protocol version supported.
+    ///
+    /// Currently must be set to 2.
     pub max_version: u16,
+    /// Flags indicating optional protocol features supported by the downstream.
+    ///
+    /// Each [`SetupConnection::protocol`] value has it's own flags.
     pub flags: u32,
+    /// ASCII representation of the connection hostname or IP address.
     pub endpoint_host: CVec,
+    /// Connection port value.
     pub endpoint_port: u16,
+    /// Device vendor name.
     pub vendor: CVec,
+    /// Device hardware version.
     pub hardware_version: CVec,
+    /// Device firmware version.
     pub firmware: CVec,
+    /// Device identifier.
     pub device_id: CVec,
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'a> CSetupConnection {
-    #[cfg(not(feature = "with_serde"))]
     #[allow(clippy::wrong_self_convention)]
+    /// Convert C representation to Rust representation
     pub fn to_rust_rep_mut(&'a mut self) -> Result<SetupConnection<'a>, Error> {
         let endpoint_host: Str0255 = self.endpoint_host.as_mut_slice().try_into()?;
         let vendor: Str0255 = self.vendor.as_mut_slice().try_into()?;
@@ -164,12 +232,10 @@ impl<'a> CSetupConnection {
 }
 
 #[no_mangle]
-#[cfg(not(feature = "with_serde"))]
 pub extern "C" fn free_setup_connection(s: CSetupConnection) {
     drop(s)
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl Drop for CSetupConnection {
     fn drop(&mut self) {
         free_vec(&mut self.endpoint_host);
@@ -180,7 +246,6 @@ impl Drop for CSetupConnection {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'a> From<SetupConnection<'a>> for CSetupConnection {
     fn from(v: SetupConnection) -> Self {
         Self {
@@ -198,57 +263,65 @@ impl<'a> From<SetupConnection<'a>> for CSetupConnection {
     }
 }
 
-/// ## SetupConnection.Success (Server -> Client)
-/// Response to [`SetupConnection`] message if the server accepts the connection. The client is
-/// required to verify the set of feature flags that the server supports and act accordingly.
+/// Message used by an upstream role to accept a connection setup request from a downstream role.
+///
+/// This message is sent in response to a [`SetupConnection`] message.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Copy)]
 #[repr(C)]
 pub struct SetupConnectionSuccess {
-    /// Selected version proposed by the connecting node that the upstream
-    /// node supports. This version will be used on the connection for the rest
-    /// of its life.
+    /// Selected version based on the [`SetupConnection::min_version`] and
+    /// [`SetupConnection::max_version`] sent by the downstream role.
+    ///
+    /// This version will be used on the connection for the rest of its life.
     pub used_version: u16,
-    /// Flags indicating optional protocol features the server supports. Each
-    /// protocol from [`Protocol`] field has its own values/flags.
+    /// Flags indicating optional protocol features supported by the upstream.
+    ///
+    /// The downstream is required to verify this set of flags and act accordingly.
+    ///
+    /// Each [`SetupConnection::protocol`] field has its own values/flags.
     pub flags: u32,
 }
 
-/// ## SetupConnection.Error (Server -> Client)
-/// When protocol version negotiation fails (or there is another reason why the upstream node
-/// cannot setup the connection) the server sends this message with a particular error code prior
-/// to closing the connection.
-/// In order to allow a client to determine the set of available features for a given server (e.g. for
+/// Message used by an upstream role to reject a connection setup request from a downstream role.
+///
+/// This message is sent in response to a [`SetupConnection`] message.
+///
+/// The connection setup process could fail because of protocol version negotiation. In order to
+/// allow a downstream to determine the set of available features for a given upstream (e.g. for
 /// proxies which dynamically switch between different pools and need to be aware of supported
-/// options), clients SHOULD send a SetupConnection message with all flags set and examine the
-/// (potentially) resulting [`SetupConnectionError`] message’s flags field. The Server MUST provide
-/// the full set of flags which it does not support in each [`SetupConnectionError`] message and
-/// MUST consistently support the same set of flags across all servers on the same hostname and
-/// port number. If flags is 0, the error is a result of some condition aside from unsupported flags.
+/// options), downstream should send a [`SetupConnection`] message with all flags set and examine
+/// the (potentially) resulting [`SetupConnectionError`] message’s flags field.
+///
+/// The upstream must provide the full set of flags which it does not support in each
+/// [`SetupConnectionError`] message and must consistently support the same set of flags across all
+/// servers on the same hostname and port number.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SetupConnectionError<'decoder> {
-    /// Flags indicating features causing an error.
+    /// Unsupported feature flags.
+    ///
+    /// In case `error_code` is `unsupported-feature-flags`, this field is used to indicate which
+    /// flag is causing an error, otherwise it will be set to 0.
     pub flags: u32,
-    /// Human-readable error code(s). See Error Codes section, [link].
-    /// ### Possible error codes:
-    /// * ‘unsupported-feature-flags’
-    /// * ‘unsupported-protocol’
-    /// * ‘protocol-version-mismatch’
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+    /// Reason for setup connection error.
+    ///
+    /// Possible error codes:
+    /// - unsupported-feature-flags
+    /// - unsupported-protocol
+    /// - protocol-version-mismatch
     pub error_code: Str0255<'decoder>,
 }
 
 #[repr(C)]
-#[cfg(not(feature = "with_serde"))]
 #[derive(Debug, Clone)]
+/// C representation of [`SetupConnectionError`]
 pub struct CSetupConnectionError {
     flags: u32,
     error_code: CVec,
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'a> CSetupConnectionError {
-    #[cfg(not(feature = "with_serde"))]
     #[allow(clippy::wrong_self_convention)]
+    /// Convert C representation to Rust representation
     pub fn to_rust_rep_mut(&'a mut self) -> Result<SetupConnectionError<'a>, Error> {
         let error_code: Str0255 = self.error_code.as_mut_slice().try_into()?;
 
@@ -260,19 +333,16 @@ impl<'a> CSetupConnectionError {
 }
 
 #[no_mangle]
-#[cfg(not(feature = "with_serde"))]
 pub extern "C" fn free_setup_connection_error(s: CSetupConnectionError) {
     drop(s)
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl Drop for CSetupConnectionError {
     fn drop(&mut self) {
         free_vec(&mut self.error_code);
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'a> From<SetupConnectionError<'a>> for CSetupConnectionError {
     fn from(v: SetupConnectionError<'a>) -> Self {
         Self {
@@ -282,22 +352,19 @@ impl<'a> From<SetupConnectionError<'a>> for CSetupConnectionError {
     }
 }
 
-/// MiningProtocol = [`SV2_MINING_PROTOCOL_DISCRIMINANT`],
-/// JobDeclarationProtocol = [`SV2_JOB_NEG_PROTOCOL_DISCRIMINANT`],
-/// TemplateDistributionProtocol = [`SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT`],
-/// JobDistributionProtocol = [`SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT`],
-#[cfg_attr(feature = "with_serde", derive(Serialize_repr, Deserialize_repr))]
+/// This enum has a list of the different Stratum V2 subprotocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[allow(clippy::enum_variant_names)]
 pub enum Protocol {
+    /// Mining protocol.
     MiningProtocol = SV2_MINING_PROTOCOL_DISCRIMINANT,
-    JobDeclarationProtocol = SV2_JOB_NEG_PROTOCOL_DISCRIMINANT,
+    /// Job declaration protocol.
+    JobDeclarationProtocol = SV2_JOB_DECLARATION_PROTOCOL_DISCRIMINANT,
+    /// Template distribution protocol.
     TemplateDistributionProtocol = SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT,
-    JobDistributionProtocol = SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT,
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'a> From<Protocol> for binary_sv2::encodable::EncodableField<'a> {
     fn from(v: Protocol) -> Self {
         let val = v as u8;
@@ -305,12 +372,11 @@ impl<'a> From<Protocol> for binary_sv2::encodable::EncodableField<'a> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> binary_sv2::Decodable<'decoder> for Protocol {
     fn get_structure(
         _: &[u8],
     ) -> core::result::Result<alloc::vec::Vec<FieldMarker>, binary_sv2::Error> {
-        let field: FieldMarker = 0_u8.into();
+        let field: FieldMarker = (0_u8).into();
         Ok(alloc::vec![field])
     }
     fn from_decoded_fields(
@@ -329,9 +395,8 @@ impl TryFrom<u8> for Protocol {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             SV2_MINING_PROTOCOL_DISCRIMINANT => Ok(Protocol::MiningProtocol),
-            SV2_JOB_NEG_PROTOCOL_DISCRIMINANT => Ok(Protocol::JobDeclarationProtocol),
+            SV2_JOB_DECLARATION_PROTOCOL_DISCRIMINANT => Ok(Protocol::JobDeclarationProtocol),
             SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT => Ok(Protocol::TemplateDistributionProtocol),
-            SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT => Ok(Protocol::JobDistributionProtocol),
             _ => Err(()),
         }
     }
@@ -343,45 +408,6 @@ impl GetSize for Protocol {
     }
 }
 
-#[cfg(feature = "with_serde")]
-impl From<Protocol> for u8 {
-    fn from(val: Protocol) -> Self {
-        match val {
-            Protocol::MiningProtocol => SV2_MINING_PROTOCOL_DISCRIMINANT,
-            Protocol::JobDeclarationProtocol => SV2_JOB_NEG_PROTOCOL_DISCRIMINANT,
-            Protocol::TemplateDistributionProtocol => SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT,
-            Protocol::JobDistributionProtocol => SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT,
-        }
-    }
-}
-
-#[cfg(feature = "with_serde")]
-impl<'d> GetSize for SetupConnectionError<'d> {
-    fn get_size(&self) -> usize {
-        self.flags.get_size() + self.error_code.get_size()
-    }
-}
-#[cfg(feature = "with_serde")]
-impl GetSize for SetupConnectionSuccess {
-    fn get_size(&self) -> usize {
-        self.used_version.get_size() + self.flags.get_size()
-    }
-}
-#[cfg(feature = "with_serde")]
-impl<'d> GetSize for SetupConnection<'d> {
-    fn get_size(&self) -> usize {
-        self.protocol.get_size()
-            + self.min_version.get_size()
-            + self.max_version.get_size()
-            + self.flags.get_size()
-            + self.endpoint_host.get_size()
-            + self.endpoint_port.get_size()
-            + self.vendor.get_size()
-            + self.hardware_version.get_size()
-            + self.firmware.get_size()
-            + self.device_id.get_size()
-    }
-}
 #[cfg(test)]
 mod test {
     use super::*;
@@ -391,12 +417,22 @@ mod test {
     #[test]
     fn test_check_flag() {
         let protocol = crate::Protocol::MiningProtocol;
-        let flag_avaiable = 0b_0000_0000_0000_0000_0000_0000_0000_0000;
+        let flag_available = 0b_0000_0000_0000_0000_0000_0000_0000_0000;
         let flag_required = 0b_0000_0000_0000_0000_0000_0000_0000_0001;
         assert!(SetupConnection::check_flags(
             protocol,
-            flag_avaiable,
+            flag_available,
             flag_required
+        ));
+
+        let protocol = crate::Protocol::JobDeclarationProtocol;
+
+        let available_flags = 0b_1000_0000_0000_0000_0000_0000_0000_0000;
+        let required_flags = 0b_1000_0000_0000_0000_0000_0000_0000_0000;
+        assert!(SetupConnection::check_flags(
+            protocol,
+            available_flags,
+            required_flags
         ));
     }
 

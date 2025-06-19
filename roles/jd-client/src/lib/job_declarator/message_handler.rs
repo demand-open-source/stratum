@@ -3,8 +3,7 @@ use roles_logic_sv2::{
     handlers::{job_declaration::ParseServerJobDeclarationMessages, SendTo_},
     job_declaration_sv2::{
         AllocateMiningJobTokenSuccess, DeclareMiningJobError, DeclareMiningJobSuccess,
-        IdentifyTransactions, IdentifyTransactionsSuccess, ProvideMissingTransactions,
-        ProvideMissingTransactionsSuccess,
+        ProvideMissingTransactions, ProvideMissingTransactionsSuccess,
     },
     parsers::JobDeclaration,
 };
@@ -36,29 +35,26 @@ impl ParseServerJobDeclarationMessages for JobDeclarator {
         Ok(SendTo::None(None))
     }
 
-    fn handle_identify_transactions(
-        &mut self,
-        message: IdentifyTransactions,
-    ) -> Result<SendTo, Error> {
-        let message_identify_transactions = IdentifyTransactionsSuccess {
-            request_id: message.request_id,
-            tx_data_hashes: Vec::new().into(),
-        };
-        let message_enum =
-            JobDeclaration::IdentifyTransactionsSuccess(message_identify_transactions);
-        Ok(SendTo::Respond(message_enum))
-    }
-
     fn handle_provide_missing_transactions(
         &mut self,
         message: ProvideMissingTransactions,
     ) -> Result<SendTo, Error> {
         let tx_list = self
-            .last_declare_mining_job_sent
-            .clone()
-            .unwrap()
-            .tx_list
-            .into_inner();
+            .last_declare_mining_jobs_sent
+            .iter()
+            .find_map(|entry| {
+                if let Some((id, last_declare_job)) = entry {
+                    if *id == message.request_id {
+                        Some(last_declare_job.clone().tx_list.into_inner())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::UnknownRequestId(message.request_id))?;
+
         let unknown_tx_position_list: Vec<u16> = message.unknown_tx_position_list.into_inner();
         let missing_transactions: Vec<binary_sv2::B016M> = unknown_tx_position_list
             .iter()

@@ -5,15 +5,14 @@ use crate::{
     status,
 };
 use async_channel::{bounded, Receiver, Sender};
-use async_std::{
-    io::BufReader,
-    net::{TcpListener, TcpStream},
-    prelude::*,
-    task,
-};
 use error_handling::handle_result;
-use futures::FutureExt;
-use tokio::sync::broadcast;
+use futures::{FutureExt, StreamExt};
+use tokio::{
+    io::{AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+    sync::broadcast,
+    task::AbortHandle,
+};
 
 use super::{kill, DownstreamMessages, SubmitShareWithChannelId, SUBSCRIBE_TIMEOUT_SECS};
 
@@ -62,6 +61,7 @@ pub struct Downstream {
     extranonce2_len: usize,
     pub(super) difficulty_mgmt: DownstreamDifficultyConfig,
     pub(super) upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+    last_job_id: String, // we usually receive a String on SV1 messages, no need to cast to u32
 }
 
 impl Downstream {
@@ -78,6 +78,7 @@ impl Downstream {
         extranonce2_len: usize,
         difficulty_mgmt: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        last_job_id: String,
     ) -> Self {
         Downstream {
             connection_id,
@@ -91,6 +92,7 @@ impl Downstream {
             extranonce2_len,
             difficulty_mgmt,
             upstream_difficulty_config,
+            last_job_id,
         }
     }
     /// Instantiate a new `Downstream`.
@@ -107,16 +109,11 @@ impl Downstream {
         host: String,
         difficulty_config: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        task_collector: Arc<Mutex<Vec<(AbortHandle, String)>>>,
     ) {
-        let stream = std::sync::Arc::new(stream);
-
         // Reads and writes from Downstream SV1 Mining Device Client
-        let (socket_reader, socket_writer) = (stream.clone(), stream);
+        let (socket_reader, mut socket_writer) = stream.into_split();
         let (tx_outgoing, receiver_outgoing) = bounded(10);
-
-        let socket_writer_clone = socket_writer.clone();
-        // Used to send SV1 `mining.notify` messages to the Downstreams
-        let _socket_writer_notify = socket_writer;
 
         let downstream = Arc::new(Mutex::new(Downstream {
             connection_id,
@@ -131,31 +128,34 @@ impl Downstream {
             extranonce2_len,
             difficulty_mgmt: difficulty_config,
             upstream_difficulty_config,
+            last_job_id: "".to_string(),
         }));
         let self_ = downstream.clone();
 
         let host_ = host.clone();
         // The shutdown channel is used local to the `Downstream::new_downstream()` function.
-        // Each task is set broadcast a shutdown message at the end of their lifecycle with `kill()`, and each task has a receiver to listen
-        // for the shutdown message. When a shutdown message is received the task should `break` its loop. For any errors that should shut
-        // a task down, we should `break` out of the loop, so that the `kill` function can send the shutdown broadcast.
-        // EXTRA: The since all downstream tasks rely on receiving messages with a future (either TCP recv or Receiver<_>)
-        // we use the futures::select! macro to merge the receiving end of a task channels into a single loop within the task
+        // Each task is set broadcast a shutdown message at the end of their lifecycle with
+        // `kill()`, and each task has a receiver to listen for the shutdown message. When a
+        // shutdown message is received the task should `break` its loop. For any errors that should
+        // shut a task down, we should `break` out of the loop, so that the `kill` function
+        // can send the shutdown broadcast. EXTRA: The since all downstream tasks rely on
+        // receiving messages with a future (either TCP recv or Receiver<_>) we use the
+        // futures::select! macro to merge the receiving end of a task channels into a single loop
+        // within the task
         let (tx_shutdown, rx_shutdown): (Sender<bool>, Receiver<bool>) = async_channel::bounded(3);
 
         let rx_shutdown_clone = rx_shutdown.clone();
         let tx_shutdown_clone = tx_shutdown.clone();
         let tx_status_reader = tx_status.clone();
+        let task_collector_mining_device = task_collector.clone();
         // Task to read from SV1 Mining Device Client socket via `socket_reader`. Depending on the
         // SV1 message received, a message response is sent directly back to the SV1 Downstream
         // role, or the message is sent upwards to the Bridge for translation into a SV2 message
         // and then sent to the SV2 Upstream role.
-        let _socket_reader_task = task::spawn(async move {
-            let reader = BufReader::new(&*socket_reader);
-            let mut messages = FramedRead::new(
-                async_compat::Compat::new(reader),
-                LinesCodec::new_with_max_length(MAX_LINE_LENGTH),
-            );
+        let socket_reader_task = tokio::task::spawn(async move {
+            let reader = BufReader::new(socket_reader);
+            let mut messages =
+                FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_LINE_LENGTH));
             loop {
                 // Read message from SV1 Mining Device Client socket
                 // On message receive, parse to `json_rpc:Message` and send to Upstream
@@ -201,15 +201,22 @@ impl Downstream {
             kill(&tx_shutdown_clone).await;
             warn!("Downstream: Shutting down sv1 downstream reader");
         });
+        let _ = task_collector_mining_device.safe_lock(|a| {
+            a.push((
+                socket_reader_task.abort_handle(),
+                "socket_reader_task".to_string(),
+            ))
+        });
 
         let rx_shutdown_clone = rx_shutdown.clone();
         let tx_shutdown_clone = tx_shutdown.clone();
         let tx_status_writer = tx_status.clone();
         let host_ = host.clone();
 
+        let task_collector_new_sv1_message_no_transl = task_collector.clone();
         // Task to receive SV1 message responses to SV1 messages that do NOT need translation.
         // These response messages are sent directly to the SV1 Downstream role.
-        let _socket_writer_task = task::spawn(async move {
+        let socket_writer_task = tokio::task::spawn(async move {
             loop {
                 select! {
                     res = receiver_outgoing.recv().fuse() => {
@@ -222,7 +229,7 @@ impl Downstream {
                             }
                         };
                         debug!("Sending to Mining Device: {} - {:?}", &host_, &to_send);
-                        let res = (&*socket_writer_clone)
+                        let res = socket_writer
                                     .write_all(to_send.as_bytes())
                                     .await;
                         handle_result!(tx_status_writer, res);
@@ -238,11 +245,18 @@ impl Downstream {
                 &host_
             );
         });
+        let _ = task_collector_new_sv1_message_no_transl.safe_lock(|a| {
+            a.push((
+                socket_writer_task.abort_handle(),
+                "socket_writer_task".to_string(),
+            ))
+        });
 
         let tx_status_notify = tx_status;
         let self_ = downstream.clone();
 
-        let _notify_task = task::spawn(async move {
+        let task_collector_notify_task = task_collector.clone();
+        let notify_task = tokio::task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut first_sent = false;
             loop {
@@ -258,7 +272,8 @@ impl Downstream {
                         tx_status_notify,
                         Self::hash_rate_to_target(downstream.clone())
                     );
-                    // make sure the mining start time is initialized and reset number of shares submitted
+                    // make sure the mining start time is initialized and reset number of shares
+                    // submitted
                     handle_result!(
                         tx_status_notify,
                         Self::init_difficulty_management(downstream.clone(), &target).await
@@ -271,6 +286,11 @@ impl Downstream {
                     );
 
                     let sv1_mining_notify_msg = last_notify.clone().unwrap();
+
+                    self_
+                        .safe_lock(|s| s.last_job_id = sv1_mining_notify_msg.clone().job_id)
+                        .unwrap();
+
                     let message: json_rpc::Message = sv1_mining_notify_msg.into();
                     handle_result!(
                         tx_status_notify,
@@ -284,15 +304,18 @@ impl Downstream {
                     }
                     first_sent = true;
                 } else if is_a {
-                    // if hashrate has changed, update difficulty management, and send new mining.set_difficulty
+                    // if hashrate has changed, update difficulty management, and send new
+                    // mining.set_difficulty
                     select! {
                         res = rx_sv1_notify.recv().fuse() => {
                             // if hashrate has changed, update difficulty management, and send new mining.set_difficulty
                             handle_result!(tx_status_notify, Self::try_update_difficulty_settings(downstream.clone()).await);
 
-
                             let sv1_mining_notify_msg = handle_result!(tx_status_notify, res);
-                            let message: json_rpc::Message = sv1_mining_notify_msg.into();
+                            let message: json_rpc::Message = sv1_mining_notify_msg.clone().into();
+
+                            self_.safe_lock(|s| s.last_job_id = sv1_mining_notify_msg.job_id).unwrap();
+
                             handle_result!(tx_status_notify, Downstream::send_message_downstream(downstream.clone(), message).await);
                         },
                         _ = rx_shutdown.recv().fuse() => {
@@ -300,7 +323,8 @@ impl Downstream {
                             }
                     };
                 } else {
-                    // timeout connection if miner does not send the authorize message after sending a subscribe
+                    // timeout connection if miner does not send the authorize message after sending
+                    // a subscribe
                     if timeout_timer.elapsed().as_secs() > SUBSCRIBE_TIMEOUT_SECS {
                         debug!(
                             "Downstream: miner.subscribe/miner.authorize TIMOUT for {}",
@@ -308,7 +332,7 @@ impl Downstream {
                         );
                         break;
                     }
-                    task::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
             let _ = Self::remove_miner_hashrate_from_channel(self_);
@@ -318,10 +342,14 @@ impl Downstream {
                 &host
             );
         });
+
+        let _ = task_collector_notify_task
+            .safe_lock(|a| a.push((notify_task.abort_handle(), "notify_task".to_string())));
     }
 
     /// Accept connections from one or more SV1 Downstream roles (SV1 Mining Devices) and create a
     /// new `Downstream` for each connection.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_connections(
         downstream_addr: SocketAddr,
         tx_sv1_submit: Sender<DownstreamMessages>,
@@ -330,42 +358,56 @@ impl Downstream {
         bridge: Arc<Mutex<crate::proxy::Bridge>>,
         downstream_difficulty_config: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        task_collector: Arc<Mutex<Vec<(AbortHandle, String)>>>,
     ) {
-        task::spawn(async move {
-            let downstream_listener = TcpListener::bind(downstream_addr).await.unwrap();
-            let mut downstream_incoming = downstream_listener.incoming();
+        let accept_connections = tokio::task::spawn({
+            let task_collector = task_collector.clone();
+            async move {
+                let listener = TcpListener::bind(downstream_addr).await.unwrap();
 
-            while let Some(stream) = downstream_incoming.next().await {
-                let stream = stream.expect("Err on SV1 Downstream connection stream");
-                let expected_hash_rate = downstream_difficulty_config.min_individual_miner_hashrate;
-                let open_sv1_downstream = bridge
-                    .safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate))
-                    .unwrap();
+                while let Ok((stream, _)) = listener.accept().await {
+                    let expected_hash_rate =
+                        downstream_difficulty_config.min_individual_miner_hashrate;
+                    let open_sv1_downstream = bridge
+                        .safe_lock(|s| s.on_new_sv1_connection(expected_hash_rate))
+                        .unwrap();
 
-                let host = stream.peer_addr().unwrap().to_string();
-                match open_sv1_downstream {
-                    Ok(opened) => {
-                        info!("PROXY SERVER - ACCEPTING FROM DOWNSTREAM: {}", host);
-                        Downstream::new_downstream(
-                            stream,
-                            opened.channel_id,
-                            tx_sv1_submit.clone(),
-                            tx_mining_notify.subscribe(),
-                            tx_status.listener_to_connection(),
-                            opened.extranonce,
-                            opened.last_notify,
-                            opened.extranonce2_len as usize,
-                            host,
-                            downstream_difficulty_config.clone(),
-                            upstream_difficulty_config.clone(),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to create a new downstream connection: {:?}", e);
+                    let host = stream.peer_addr().unwrap().to_string();
+
+                    match open_sv1_downstream {
+                        Ok(opened) => {
+                            info!("PROXY SERVER - ACCEPTING FROM DOWNSTREAM: {}", host);
+                            Downstream::new_downstream(
+                                stream,
+                                opened.channel_id,
+                                tx_sv1_submit.clone(),
+                                tx_mining_notify.subscribe(),
+                                tx_status.listener_to_connection(),
+                                opened.extranonce,
+                                opened.last_notify,
+                                opened.extranonce2_len as usize,
+                                host,
+                                downstream_difficulty_config.clone(),
+                                upstream_difficulty_config.clone(),
+                                task_collector.clone(),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to create a new downstream connection: {:?}",
+                                e
+                            );
+                        }
                     }
                 }
             }
+        });
+        let _ = task_collector.safe_lock(|a| {
+            a.push((
+                accept_connections.abort_handle(),
+                "accept_connections".to_string(),
+            ))
         });
     }
 
@@ -491,12 +533,12 @@ impl IsServer<'static> for Downstream {
     /// When miner find the job which meets requested difficulty, it can submit share to the server.
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
-        info!("Down: Submitting Share");
+        info!("Down: Submitting Share {:?}", request);
         debug!("Down: Handling mining.submit: {:?}", &request);
 
         // TODO: Check if receiving valid shares by adding diff field to Downstream
 
-        if self.first_job_received {
+        if request.job_id == self.last_job_id {
             let to_send = SubmitShareWithChannelId {
                 channel_id: self.connection_id,
                 share: request.clone(),
@@ -504,11 +546,15 @@ impl IsServer<'static> for Downstream {
                 extranonce2_len: self.extranonce2_len,
                 version_rolling_mask: self.version_rolling_mask.clone(),
             };
+
             self.tx_sv1_bridge
                 .try_send(DownstreamMessages::SubmitShares(to_send))
                 .unwrap();
-        };
-        true
+
+            true
+        } else {
+            false
+        }
     }
 
     /// Indicates to the server that the client supports the mining.set_extranonce method.

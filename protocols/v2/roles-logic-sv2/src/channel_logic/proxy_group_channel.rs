@@ -1,3 +1,7 @@
+//! # Proxy Group Channel
+//!
+//! This module contains logic for managing Standard Channels via Group Channels.
+
 use crate::{common_properties::StandardChannel, parsers::Mining, Error};
 
 use mining_sv2::{
@@ -8,12 +12,13 @@ use super::extended_to_standard_job;
 use nohash_hasher::BuildNoHashHasher;
 use std::collections::HashMap;
 
-/// wrapper around `GroupChannel` for managing multiple group channels
+/// Wrapper around `GroupChannel` for managing multiple group channels
 #[derive(Debug, Clone, Default)]
 pub struct GroupChannels {
     channels: HashMap<u32, GroupChannel>,
 }
 impl GroupChannels {
+    /// Constructor
     pub fn new() -> Self {
         Self {
             channels: HashMap::new(),
@@ -35,13 +40,15 @@ impl GroupChannels {
             None => unreachable!(),
         }
     }
-    /// Called when a new prev hash arrives. We loop through all group channels to update state within each group
+    /// Called when a new prev hash arrives. We loop through all group channels to update state
+    /// within each group
     pub fn update_new_prev_hash(&mut self, m: &SetNewPrevHash) {
         for group in self.channels.values_mut() {
             group.update_new_prev_hash(m);
         }
     }
-    /// Called when a new extended job arrives. We loop through all group channels to update state within group
+    /// Called when a new extended job arrives. We loop through all group channels to update state
+    /// within group
     pub fn on_new_extended_mining_job(&mut self, m: &NewExtendedMiningJob) {
         for group in &mut self.channels.values_mut() {
             let cloned = NewExtendedMiningJob {
@@ -68,6 +75,8 @@ impl GroupChannels {
             None => Err(Error::GroupIdNotFound),
         }
     }
+
+    /// Get group channel ids
     pub fn ids(&self) -> Vec<u32> {
         self.channels.keys().copied().collect()
     }
@@ -92,8 +101,9 @@ impl GroupChannel {
             last_received_job: None,
         }
     }
-    /// Called when a channel is successfully opened for header only mining on standard channels.
-    /// Here we store the new channel, and update state for jobs and return relevant SV2 messages (NewMiningJob and SNPH)
+    // Called when a channel is successfully opened for header only mining(HOM) on standard
+    // channels. Here, we store the new channel, and update state for jobs and return relevant
+    // SV2 messages (NewMiningJob and SNPH)
     fn on_channel_success_for_hom_downtream(
         &mut self,
         m: OpenStandardMiningChannelSuccess,
@@ -112,6 +122,7 @@ impl GroupChannel {
                 &channel.extranonce.clone().to_vec(),
                 channel.channel_id,
                 None,
+                None,
             )
             .ok_or(Error::ImpossibleToCalculateMerkleRoot)?;
             res.push(Mining::NewMiningJob(standard_job));
@@ -122,6 +133,7 @@ impl GroupChannel {
                 last_valid_job,
                 &channel.extranonce.clone().to_vec(),
                 channel.channel_id,
+                None,
                 None,
             )
             .ok_or(Error::ImpossibleToCalculateMerkleRoot)?;
@@ -143,9 +155,10 @@ impl GroupChannel {
 
         Ok(res)
     }
-    /// If a matching job is already in the future job queue,
-    /// we set a new valid job, otherwise we clear the future jobs
-    /// queue and stage a prev hash to be used when the job arrives
+
+    // If a matching job is already in the future job queue,
+    // we set a new valid job, otherwise we clear the future jobs
+    // queue and stage a prev hash to be used when the job arrives
     fn update_new_prev_hash(&mut self, m: &SetNewPrevHash) {
         while let Some(job) = self.future_jobs.pop() {
             if job.job_id == m.job_id {
@@ -163,8 +176,9 @@ impl GroupChannel {
         };
         self.last_prev_hash = Some(cloned.clone());
     }
-    /// Pushes new job to future_job queue if it is future,
-    /// otherwise we set it as the valid job
+
+    // Pushes new job to future_job queue if it is future,
+    // otherwise we set it as the valid job
     fn on_new_extended_mining_job(&mut self, m: NewExtendedMiningJob<'static>) {
         self.last_received_job = Some(m.clone());
         if m.is_future() {
@@ -173,7 +187,8 @@ impl GroupChannel {
             self.last_valid_job = Some(m)
         }
     }
-    /// Returns most recent job
+
+    // Returns most recent job
     fn last_received_job_to_standard_job(
         &mut self,
         channel_id: u32,
@@ -188,6 +203,7 @@ impl GroupChannel {
                     m,
                     &downstream.extranonce.clone().to_vec(),
                     downstream.channel_id,
+                    None,
                     None,
                 )
                 .ok_or(Error::ImpossibleToCalculateMerkleRoot)

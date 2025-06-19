@@ -4,45 +4,66 @@
 #include <ostream>
 #include <new>
 
+/// Identifier for the extension_type field in the SV2 frame, indicating no
+/// extensions.
 static const uint16_t EXTENSION_TYPE_NO_EXTENSION = 0;
 
+/// Size of the SV2 frame header in bytes.
 static const uintptr_t SV2_FRAME_HEADER_SIZE = 6;
 
 static const uintptr_t SV2_FRAME_HEADER_LEN_OFFSET = 3;
 
 static const uintptr_t SV2_FRAME_HEADER_LEN_END = 3;
 
+/// Maximum size of an SV2 frame chunk in bytes.
 static const uintptr_t SV2_FRAME_CHUNK_SIZE = 65535;
 
+/// Size of the MAC for supported AEAD encryption algorithm (ChaChaPoly).
 static const uintptr_t AEAD_MAC_LEN = 16;
 
+/// Size of the encrypted SV2 frame header, including the MAC.
 static const uintptr_t ENCRYPTED_SV2_FRAME_HEADER_SIZE = (SV2_FRAME_HEADER_SIZE + AEAD_MAC_LEN);
 
+/// Size of the Noise protocol frame header in bytes.
 static const uintptr_t NOISE_FRAME_HEADER_SIZE = 2;
 
 static const uintptr_t NOISE_FRAME_HEADER_LEN_OFFSET = 0;
 
+/// Size in bytes of the encoded elliptic curve point using ElligatorSwift
+/// encoding. This encoding produces a 64-byte representation of the
+/// X-coordinate of a secp256k1 curve point.
 static const uintptr_t ELLSWIFT_ENCODING_SIZE = 64;
 
 static const uintptr_t RESPONDER_EXPECTED_HANDSHAKE_MESSAGE_SIZE = ELLSWIFT_ENCODING_SIZE;
 
 static const uintptr_t MAC = 16;
 
+/// Size in bytes of the encrypted ElligatorSwift encoded data, which includes
+/// the original ElligatorSwift encoded data and a MAC for integrity
+/// verification.
 static const uintptr_t ENCRYPTED_ELLSWIFT_ENCODING_SIZE = (ELLSWIFT_ENCODING_SIZE + MAC);
 
+/// Size in bytes of the SIGNATURE_NOISE_MESSAGE, which contains information and
+/// a signature for the handshake initiator, formatted according to the Noise
+/// Protocol specifications.
 static const uintptr_t SIGNATURE_NOISE_MESSAGE_SIZE = 74;
 
+/// Size in bytes of the encrypted signature noise message, which includes the
+/// SIGNATURE_NOISE_MESSAGE and a MAC for integrity verification.
 static const uintptr_t ENCRYPTED_SIGNATURE_NOISE_MESSAGE_SIZE = (SIGNATURE_NOISE_MESSAGE_SIZE + MAC);
 
+/// Size in bytes of the handshake message expected by the initiator,
+/// encompassing:
+/// - ElligatorSwift encoded public key
+/// - Encrypted ElligatorSwift encoding
+/// - Encrypted SIGNATURE_NOISE_MESSAGE
 static const uintptr_t INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE = ((ELLSWIFT_ENCODING_SIZE + ENCRYPTED_ELLSWIFT_ENCODING_SIZE) + ENCRYPTED_SIGNATURE_NOISE_MESSAGE_SIZE);
 
 static const uint8_t SV2_MINING_PROTOCOL_DISCRIMINANT = 0;
 
-static const uint8_t SV2_JOB_NEG_PROTOCOL_DISCRIMINANT = 1;
+static const uint8_t SV2_JOB_DECLARATION_PROTOCOL_DISCRIMINANT = 1;
 
 static const uint8_t SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT = 2;
-
-static const uint8_t SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT = 3;
 
 static const uint8_t MESSAGE_TYPE_SETUP_CONNECTION = 0;
 
@@ -51,6 +72,66 @@ static const uint8_t MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS = 1;
 static const uint8_t MESSAGE_TYPE_SETUP_CONNECTION_ERROR = 2;
 
 static const uint8_t MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED = 3;
+
+static const uint8_t MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL = 16;
+
+static const uint8_t MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS = 17;
+
+static const uint8_t MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR = 18;
+
+static const uint8_t MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL = 19;
+
+static const uint8_t MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCES = 20;
+
+static const uint8_t MESSAGE_TYPE_NEW_MINING_JOB = 21;
+
+static const uint8_t MESSAGE_TYPE_UPDATE_CHANNEL = 22;
+
+static const uint8_t MESSAGE_TYPE_UPDATE_CHANNEL_ERROR = 23;
+
+static const uint8_t MESSAGE_TYPE_CLOSE_CHANNEL = 24;
+
+static const uint8_t MESSAGE_TYPE_SET_EXTRANONCE_PREFIX = 25;
+
+static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_STANDARD = 26;
+
+static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED = 27;
+
+static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS = 28;
+
+static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_ERROR = 29;
+
+static const uint8_t MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB = 31;
+
+static const uint8_t MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH = 32;
+
+static const uint8_t MESSAGE_TYPE_SET_TARGET = 33;
+
+static const uint8_t MESSAGE_TYPE_SET_CUSTOM_MINING_JOB = 34;
+
+static const uint8_t MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS = 35;
+
+static const uint8_t MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR = 36;
+
+static const uint8_t MESSAGE_TYPE_RECONNECT = 37;
+
+static const uint8_t MESSAGE_TYPE_SET_GROUP_CHANNEL = 38;
+
+static const uint8_t MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN = 80;
+
+static const uint8_t MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS = 81;
+
+static const uint8_t MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS = 85;
+
+static const uint8_t MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS = 86;
+
+static const uint8_t MESSAGE_TYPE_DECLARE_MINING_JOB = 87;
+
+static const uint8_t MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS = 88;
+
+static const uint8_t MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR = 89;
+
+static const uint8_t MESSAGE_TYPE_SUBMIT_SOLUTION_JD = 96;
 
 static const uint8_t MESSAGE_TYPE_COINBASE_OUTPUT_DATA_SIZE = 112;
 
@@ -65,72 +146,6 @@ static const uint8_t MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS = 116;
 static const uint8_t MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR = 117;
 
 static const uint8_t MESSAGE_TYPE_SUBMIT_SOLUTION = 118;
-
-static const uint8_t MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN = 80;
-
-static const uint8_t MESSAGE_TYPE_ALLOCATE_MINING_JOB_TOKEN_SUCCESS = 81;
-
-static const uint8_t MESSAGE_TYPE_DECLARE_MINING_JOB = 87;
-
-static const uint8_t MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS = 88;
-
-static const uint8_t MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR = 89;
-
-static const uint8_t MESSAGE_TYPE_IDENTIFY_TRANSACTIONS = 83;
-
-static const uint8_t MESSAGE_TYPE_IDENTIFY_TRANSACTIONS_SUCCESS = 84;
-
-static const uint8_t MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS = 85;
-
-static const uint8_t MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS = 86;
-
-static const uint8_t MESSAGE_TYPE_SUBMIT_SOLUTION_JD = 96;
-
-static const uint8_t MESSAGE_TYPE_CLOSE_CHANNEL = 24;
-
-/// This has been cahnged before was 0x1e it can be that old Sv2 implementation still use the old
-/// one but this means that old impl are not following Sv2 spec
-static const uint8_t MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB = 31;
-
-static const uint8_t MESSAGE_TYPE_NEW_MINING_JOB = 21;
-
-static const uint8_t MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL = 19;
-
-static const uint8_t MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCES = 20;
-
-static const uint8_t MESSAGE_TYPE_OPEN_MINING_CHANNEL_ERROR = 18;
-
-static const uint8_t MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL = 16;
-
-static const uint8_t MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL_SUCCESS = 17;
-
-static const uint8_t MESSAGE_TYPE_RECONNECT = 37;
-
-static const uint8_t MESSAGE_TYPE_SET_CUSTOM_MINING_JOB = 34;
-
-static const uint8_t MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_ERROR = 36;
-
-static const uint8_t MESSAGE_TYPE_SET_CUSTOM_MINING_JOB_SUCCESS = 35;
-
-static const uint8_t MESSAGE_TYPE_SET_EXTRANONCE_PREFIX = 25;
-
-static const uint8_t MESSAGE_TYPE_SET_GROUP_CHANNEL = 38;
-
-static const uint8_t MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH = 32;
-
-static const uint8_t MESSAGE_TYPE_SET_TARGET = 33;
-
-static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_ERROR = 29;
-
-static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_EXTENDED = 27;
-
-static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_STANDARD = 26;
-
-static const uint8_t MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS = 28;
-
-static const uint8_t MESSAGE_TYPE_UPDATE_CHANNEL = 22;
-
-static const uint8_t MESSAGE_TYPE_UPDATE_CHANNEL_ERROR = 23;
 
 static const bool CHANNEL_BIT_SETUP_CONNECTION = false;
 
@@ -163,10 +178,6 @@ static const bool CHANNEL_BIT_DECLARE_MINING_JOB = false;
 static const bool CHANNEL_BIT_DECLARE_MINING_JOB_SUCCESS = false;
 
 static const bool CHANNEL_BIT_DECLARE_MINING_JOB_ERROR = false;
-
-static const bool CHANNEL_BIT_IDENTIFY_TRANSACTIONS = false;
-
-static const bool CHANNEL_BIT_IDENTIFY_TRANSACTIONS_SUCCESS = false;
 
 static const bool CHANNEL_BIT_PROVIDE_MISSING_TRANSACTIONS = false;
 
@@ -223,44 +234,56 @@ static const bool CHANNEL_BIT_UPDATE_CHANNEL_ERROR = true;
 #include <ostream>
 #include <new>
 
+/// A struct to facilitate transferring a `Vec<u8>` across FFI boundaries.
 struct CVec {
   uint8_t *data;
   uintptr_t len;
   uintptr_t capacity;
 };
 
+/// A struct to manage a collection of `CVec` objects across FFI boundaries.
 struct CVec2 {
   CVec *data;
   uintptr_t len;
   uintptr_t capacity;
 };
 
+/// Represents a 24-bit unsigned integer (`U24`), supporting SV2 serialization and deserialization.
+/// Only first 3 bytes of a u32 is considered to get the SV2 value, and rest are ignored (in little
+/// endian).
 struct U24 {
   uint32_t _0;
 };
 
 extern "C" {
 
-/// Given a C allocated buffer return a rust allocated CVec
+/// Creates a `CVec` from a buffer that was allocated in C.
 ///
 /// # Safety
-///
+/// The caller must ensure that the buffer is valid and that
+/// the data length does not exceed the allocated size.
 CVec cvec_from_buffer(const uint8_t *data, uintptr_t len);
 
-/// # Safety
+/// Initializes an empty `CVec2`.
 ///
+/// # Safety
+/// The caller is responsible for freeing the `CVec2` when it is no longer needed.
 CVec2 init_cvec2();
 
-/// The caller is reponsible for NOT adding duplicate cvecs to the cvec2 structure,
-/// as this can lead to double free errors when the message is dropped.
-/// # Safety
+/// Adds a `CVec` to a `CVec2`.
 ///
+/// # Safety
+/// The caller must ensure no duplicate `CVec`s are added, as duplicates may
+/// lead to double-free errors when the message is dropped.
 void cvec2_push(CVec2 *cvec2, CVec cvec);
 
+/// Exported FFI functions for interoperability with C code for u24
 void _c_export_u24(U24 _a);
 
+/// Exported FFI functions for interoperability with C code for CVec
 void _c_export_cvec(CVec _a);
 
+/// Exported FFI functions for interoperability with C code for CVec2
 void _c_export_cvec2(CVec2 _a);
 
 } // extern "C"
@@ -270,55 +293,77 @@ void _c_export_cvec2(CVec2 _a);
 #include <ostream>
 #include <new>
 
-/// MiningProtocol = [`SV2_MINING_PROTOCOL_DISCRIMINANT`],
-/// JobDeclarationProtocol = [`SV2_JOB_NEG_PROTOCOL_DISCRIMINANT`],
-/// TemplateDistributionProtocol = [`SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT`],
-/// JobDistributionProtocol = [`SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT`],
+/// This enum has a list of the different Stratum V2 subprotocols.
 enum class Protocol : uint8_t {
+  /// Mining protocol.
   MiningProtocol = SV2_MINING_PROTOCOL_DISCRIMINANT,
-  JobDeclarationProtocol = SV2_JOB_NEG_PROTOCOL_DISCRIMINANT,
+  /// Job declaration protocol.
+  JobDeclarationProtocol = SV2_JOB_DECLARATION_PROTOCOL_DISCRIMINANT,
+  /// Template distribution protocol.
   TemplateDistributionProtocol = SV2_TEMPLATE_DISTR_PROTOCOL_DISCRIMINANT,
-  JobDistributionProtocol = SV2_JOB_DISTR_PROTOCOL_DISCRIMINANT,
 };
 
-/// ## ChannelEndpointChanged (Server -> Client)
-/// When a channel’s upstream or downstream endpoint changes and that channel had previously
-/// sent messages with [channel_msg] bitset of unknown extension_type, the intermediate proxy
-/// MUST send a [`ChannelEndpointChanged`] message. Upon receipt thereof, any extension state
-/// (including version negotiation and the presence of support for a given extension) MUST be
-/// reset and version/presence negotiation must begin again.
+/// Message used by an upstream role for announcing a mining channel endpoint change.
 ///
+/// This message should be sent when a mining channel’s upstream or downstream endpoint changes and
+/// that channel had previously exchanged message(s) with `channel_msg` bitset of unknown
+/// `extension_type`.
+///
+/// When a downstream receives such a message, any extension state (including version and extension
+/// support) must be reset and renegotiated.
 struct ChannelEndpointChanged {
-  /// The channel which has changed endpoint.
+  /// Unique identifier of the channel that has changed its endpoint.
   uint32_t channel_id;
 };
 
-/// ## SetupConnection.Success (Server -> Client)
-/// Response to [`SetupConnection`] message if the server accepts the connection. The client is
-/// required to verify the set of feature flags that the server supports and act accordingly.
+/// Message used by an upstream role to accept a connection setup request from a downstream role.
+///
+/// This message is sent in response to a [`SetupConnection`] message.
 struct SetupConnectionSuccess {
-  /// Selected version proposed by the connecting node that the upstream
-  /// node supports. This version will be used on the connection for the rest
-  /// of its life.
+  /// Selected version based on the [`SetupConnection::min_version`] and
+  /// [`SetupConnection::max_version`] sent by the downstream role.
+  ///
+  /// This version will be used on the connection for the rest of its life.
   uint16_t used_version;
-  /// Flags indicating optional protocol features the server supports. Each
-  /// protocol from [`Protocol`] field has its own values/flags.
+  /// Flags indicating optional protocol features supported by the upstream.
+  ///
+  /// The downstream is required to verify this set of flags and act accordingly.
+  ///
+  /// Each [`SetupConnection::protocol`] field has its own values/flags.
   uint32_t flags;
 };
 
+/// C representation of [`SetupConnection`]
 struct CSetupConnection {
+  /// Protocol to be used for the connection.
   Protocol protocol;
+  /// The minimum protocol version supported.
+  ///
+  /// Currently must be set to 2.
   uint16_t min_version;
+  /// The maximum protocol version supported.
+  ///
+  /// Currently must be set to 2.
   uint16_t max_version;
+  /// Flags indicating optional protocol features supported by the downstream.
+  ///
+  /// Each [`SetupConnection::protocol`] value has it's own flags.
   uint32_t flags;
+  /// ASCII representation of the connection hostname or IP address.
   CVec endpoint_host;
+  /// Connection port value.
   uint16_t endpoint_port;
+  /// Device vendor name.
   CVec vendor;
+  /// Device hardware version.
   CVec hardware_version;
+  /// Device firmware version.
   CVec firmware;
+  /// Device identifier.
   CVec device_id;
 };
 
+/// C representation of [`SetupConnectionError`]
 struct CSetupConnectionError {
   uint32_t flags;
   CVec error_code;
@@ -326,8 +371,10 @@ struct CSetupConnectionError {
 
 extern "C" {
 
+/// A C-compatible function that exports the [`ChannelEndpointChanged`] struct.
 void _c_export_channel_endpoint_changed(ChannelEndpointChanged _a);
 
+/// A C-compatible function that exports the `SetupConnection` struct.
 void _c_export_setup_conn_succ(SetupConnectionSuccess _a);
 
 void free_setup_connection(CSetupConnection s);
@@ -341,35 +388,44 @@ void free_setup_connection_error(CSetupConnectionError s);
 #include <ostream>
 #include <new>
 
-/// ## CoinbaseOutputDataSize (Client -> Server)
-/// Ultimately, the pool is responsible for adding coinbase transaction outputs for payouts and
-/// other uses, and thus the Template Provider will need to consider this additional block size
-/// when selecting transactions for inclusion in a block (to not create an invalid, oversized block).
-/// Thus, this message is used to indicate that some additional space in the block/coinbase
-/// transaction be reserved for the pool’s use (while always assuming the pool will use the entirety
-/// of available coinbase space).
-/// The Job Declarator MUST discover the maximum serialized size of the additional outputs which
-/// will be added by the pool(s) it intends to use this work. It then MUST communicate the
-/// maximum such size to the Template Provider via this message. The Template Provider MUST
-/// NOT provide NewWork messages which would represent consensus-invalid blocks once this
-/// additional size — along with a maximally-sized (100 byte) coinbase field — is added. Further,
-/// the Template Provider MUST consider the maximum additional bytes required in the output
-/// count variable-length integer in the coinbase transaction when complying with the size limits.
+/// Message used by a downstream to indicate the size of the additional bytes they will need in
+/// coinbase transaction outputs.
+///
+/// As the pool is responsible for adding coinbase transaction outputs for payouts and other uses,
+/// the Template Provider will need to consider this reserved space when selecting transactions for
+/// inclusion in a block(to avoid an invalid, oversized block).  Thus, this message indicates that
+/// additional space in the block/coinbase transaction must be reserved for, assuming they will use
+/// the entirety of this space.
+///
+/// The Job Declarator **must** discover the maximum serialized size of the additional outputs which
+/// will be added by the pools it intends to use this work. It then **must** communicate the sum of
+/// such size to the Template Provider via this message.
+///
+/// The Template Provider **must not** provide [`NewTemplate`] messages which would represent
+/// consensus-invalid blocks once this additional size — along with a maximally-sized (100 byte)
+/// coinbase field — is added. Further, the Template Provider **must** consider the maximum
+/// additional bytes required in the output count variable-length integer in the coinbase
+/// transaction when complying with the size limits.
+///
+/// [`NewTemplate`]: crate::NewTemplate
 struct CoinbaseOutputDataSize {
-  /// The maximum additional serialized bytes which the pool will add in
-  /// coinbase transaction outputs.
+  /// Additional serialized bytes needed in coinbase transaction outputs.
   uint32_t coinbase_output_max_additional_size;
 };
 
-/// ## RequestTransactionData (Client -> Server)
-/// A request sent by the Job Declarator to the Template Provider which requests the set of
-/// transaction data for all transactions (excluding the coinbase transaction) included in a block, as
-/// well as any additional data which may be required by the Pool to validate the work.
+/// Message used by a downstream to request data about all transactions in a block template.
+///
+/// Data includes the full transaction data and any additional data required to block validation.
+///
+/// Note that the coinbase transaction is excluded from this data.
 struct RequestTransactionData {
-  /// The template_id corresponding to a NewTemplate message.
+  /// Identifier of the template that the downstream node is requesting transaction data for.
+  ///
+  /// This must be identical to previously exchanged [`crate::NewTemplate::template_id`].
   uint64_t template_id;
 };
 
+/// C representation of [`NewTemplate`].
 struct CNewTemplate {
   uint64_t template_id;
   bool future_template;
@@ -384,17 +440,20 @@ struct CNewTemplate {
   CVec2 merkle_path;
 };
 
+/// C representation of [`RequestTransactionDataSuccess`].
 struct CRequestTransactionDataSuccess {
   uint64_t template_id;
   CVec excess_data;
   CVec2 transaction_list;
 };
 
+/// C representation of [`RequestTransactionDataError`].
 struct CRequestTransactionDataError {
   uint64_t template_id;
   CVec error_code;
 };
 
+/// C representation of [`SetNewPrevHash`].
 struct CSetNewPrevHash {
   uint64_t template_id;
   CVec prev_hash;
@@ -403,6 +462,7 @@ struct CSetNewPrevHash {
   CVec target;
 };
 
+/// C representation of [`SubmitSolution`].
 struct CSubmitSolution {
   uint64_t template_id;
   uint32_t version;
@@ -413,18 +473,25 @@ struct CSubmitSolution {
 
 extern "C" {
 
+/// Exports the [`CoinbaseOutputDataSize`] struct to C.
 void _c_export_coinbase_out(CoinbaseOutputDataSize _a);
 
+/// Exports the [`RequestTransactionData`] struct to C.
 void _c_export_req_tx_data(RequestTransactionData _a);
 
+/// Drops the [`CNewTemplate`] object.
 void free_new_template(CNewTemplate s);
 
+/// Drops the CRequestTransactionDataSuccess object.
 void free_request_tx_data_success(CRequestTransactionDataSuccess s);
 
+/// Drops the CRequestTransactionDataError object.
 void free_request_tx_data_error(CRequestTransactionDataError s);
 
+/// Drops the CSetNewPrevHash object.
 void free_set_new_prev_hash(CSetNewPrevHash s);
 
+/// Drops the CSubmitSolution object.
 void free_submit_solution(CSubmitSolution s);
 
 } // extern "C"
@@ -434,24 +501,32 @@ void free_submit_solution(CSubmitSolution s);
 #include <ostream>
 #include <new>
 
+/// C-compatible enumeration of possible errors in the `codec_sv2` module.
+///
+/// This enum mirrors the [`Error`] enum but is designed to be used in C code through FFI. It
+/// represents the same set of errors as [`Error`], making them accessible to C programs.
 struct CError {
   enum class Tag {
-    /// Errors from the `binary_sv2` crate
-    BinarySv2Error,
-    /// Errors from the `framing_sv2` crate
-    FramingSv2Error,
-    /// Errors if there are missing bytes in the Noise protocol
-    MissingBytes,
-    /// Errors from the `noise_sv2` crate
-    NoiseSv2Error,
-    /// `snow` errors
+    /// AEAD (`snow`) error in the Noise protocol.
     AeadError,
-    /// Error if Noise protocol state is not as expected
-    UnexpectedNoiseState,
-    InvalidStepForResponder,
-    InvalidStepForInitiator,
-    NotInHandShakeState,
+    /// Binary Sv2 data format error.
+    BinarySv2Error,
+    /// Framing Sv2 error.
     FramingError,
+    /// Framing Sv2 error.
+    FramingSv2Error,
+    /// Invalid step for initiator in the Noise protocol.
+    InvalidStepForInitiator,
+    /// Invalid step for responder in the Noise protocol.
+    InvalidStepForResponder,
+    /// Missing bytes in the Noise protocol.
+    MissingBytes,
+    /// Sv2 Noise protocol error.
+    NoiseSv2Error,
+    /// Noise protocol is not in the expected handshake state.
+    NotInHandShakeState,
+    /// Unexpected state in the Noise protocol.
+    UnexpectedNoiseState,
   };
 
   struct MissingBytes_Body {
@@ -466,7 +541,11 @@ struct CError {
 
 extern "C" {
 
-/// Here only to force cbindgen to create header for CError
+/// Force `cbindgen` to create a header for [`CError`].
+///
+/// It ensures that [`CError`] is included in the generated C header file. This function is not
+/// meant to be called and will panic if called. Its only purpose is to make [`CError`] visible to
+/// `cbindgen`.
 CError export_cerror();
 
 } // extern "C"
@@ -626,7 +705,6 @@ void flush_encoder(EncoderWrapper *encoder);
 void free_decoder(DecoderWrapper *decoder);
 
 /// # Safety
-///
 CResult<CVec, Sv2Error> encode(CSv2Message *message, EncoderWrapper *encoder);
 
 DecoderWrapper *new_decoder();

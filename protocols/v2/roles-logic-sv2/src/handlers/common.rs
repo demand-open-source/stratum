@@ -1,3 +1,29 @@
+//! # Common Handlers
+//!
+//! This module defines traits and implementations for handling common Stratum V2 messages exchanged
+//! between upstream and downstream nodes.
+//!
+//! ## Message Handling
+//!
+//! Handlers in this module are responsible for:
+//! - Parsing and deserializing common messages.
+//! - Dispatching deserialized messages to appropriate handler functions based on message type, such
+//!   as `SetupConnection` or `ChannelEndpointChanged`.
+//! - Ensuring robust error handling for unexpected or malformed messages.
+//!
+//! ## Return Type
+//!
+//! Functions return `Result<SendTo, Error>`, where `SendTo` specifies the next action for the
+//! message: whether to forward it, respond to it, or ignore it.
+//!
+//! ## Structure
+//!
+//! This module includes:
+//! - Traits for upstream and downstream message parsing and handling.
+//! - Functions to process common message types while maintaining clear separation of concerns.
+//! - Error handling mechanisms to address edge cases and ensure reliable communication within
+//!   Stratum V2 networks.
+
 use super::SendTo_;
 use crate::{
     common_properties::CommonDownstreamData,
@@ -17,19 +43,14 @@ use tracing::{debug, error, info, trace};
 /// see [`SendTo_`]
 pub type SendTo = SendTo_<CommonMessages<'static>, ()>;
 
-/// A trait that is implemented by the downstream. It should be used to parse the common messages that
-/// are sent from the upstream to the downstream.
+/// A trait that is implemented by the downstream. It should be used to parse the common messages
+/// that are sent from the upstream to the downstream.
 pub trait ParseUpstreamCommonMessages<Router: CommonRouter>
 where
     Self: Sized,
 {
-    /// Takes a message type and a payload, and if the message type is a [`crate::parsers::CommonMessages`], it
-    /// calls the appropriate handler function
-    ///
-    /// Arguments:
-    ///
-    /// * `message_type`: See [`const_sv2`].
-    ///
+    /// Takes a message type and a payload, and if the message type is a
+    /// [`crate::parsers::CommonMessages`], it calls the appropriate handler function
     fn handle_message_common(
         self_: Arc<Mutex<Self>>,
         message_type: u8,
@@ -42,12 +63,8 @@ where
             routing_logic,
         )
     }
+
     /// Takes a message and it calls the appropriate handler function
-    ///
-    /// Arguments:
-    ///
-    /// * `message_type`: See [`const_sv2`].
-    ///
     fn handle_message_common_deserilized(
         self_: Arc<Mutex<Self>>,
         message: Result<CommonMessages<'_>, Error>,
@@ -88,29 +105,40 @@ where
         }
     }
 
-    /// Called by `Self::handle_message_common` when the `SetupConnectionSuccess` message is received from the upstream node.
+    /// Handles a `SetupConnectionSuccess` message.
+    ///
+    /// This method processes a `SetupConnectionSuccess` message and handles it
+    /// by delegating to the appropriate handler.
     fn handle_setup_connection_success(
         &mut self,
         m: SetupConnectionSuccess,
     ) -> Result<SendTo, Error>;
 
-    /// Called by `Self::handle_message_common` when the `SetupConnectionError` message is received from the upstream node.
+    /// Handles a `SetupConnectionError` message.
+    ///
+    /// This method processes a `SetupConnectionError` message and handles it
+    /// by delegating to the appropriate handler.
     fn handle_setup_connection_error(&mut self, m: SetupConnectionError) -> Result<SendTo, Error>;
 
-    /// Called by `Self::handle_message_common` when the `ChannelEndpointChanged` message is received from the upstream node.
+    /// Handles a `ChannelEndpointChanged` message.
+    ///
+    /// This method processes a `ChannelEndpointChanged` message and handles it
+    /// by delegating to the appropriate handler.
     fn handle_channel_endpoint_changed(
         &mut self,
         m: ChannelEndpointChanged,
     ) -> Result<SendTo, Error>;
 }
 
-/// A trait that is implemented by the upstream node, and is used to handle [`crate::parsers::CommonMessages::SetupConnection`]
-/// messages sent by the downstream to the upstream
+/// A trait that is implemented by the upstream node, and is used to handle
+/// [`crate::parsers::CommonMessages::SetupConnection`] messages sent by the downstream to the
+/// upstream
 pub trait ParseDownstreamCommonMessages<Router: CommonRouter>
 where
     Self: Sized,
 {
-    /// Used to parse a serialized downstream setup connection message into a [`crate::parsers::CommonMessages::SetupConnection`]
+    /// Used to parse a serialized downstream setup connection message into a
+    /// [`crate::parsers::CommonMessages::SetupConnection`]
     fn parse_message(message_type: u8, payload: &mut [u8]) -> Result<SetupConnection, Error> {
         match (message_type, payload).try_into() {
             Ok(CommonMessages::SetupConnection(m)) => Ok(m),
@@ -126,14 +154,10 @@ where
             Err(e) => Err(e),
         }
     }
+
     /// It takes a message type and a payload, and if the message is a serialized setup connection
-    /// message, it calls the `on_setup_connection` function on the routing logic, and then calls the
-    /// `handle_setup_connection` function on the router
-    ///
-    /// Arguments:
-    ///
-    /// * `message_type`: See [`const_sv2`].
-    ///
+    /// message, it calls the `on_setup_connection` function on the routing logic, and then calls
+    /// the `handle_setup_connection` function on the router
     fn handle_message_common(
         self_: Arc<Mutex<Self>>,
         message_type: u8,
@@ -148,9 +172,8 @@ where
     }
 
     /// It takes a message do setup connection message, it calls
-    /// the `on_setup_connection` function on the routing logic, and then calls the
-    /// `handle_setup_connection` function on the router
-    ///
+    /// the `on_setup_connection` function on the routing logic, and then calls
+    /// the `handle_setup_connection` function on the router
     fn handle_message_common_deserilized(
         self_: Arc<Mutex<Self>>,
         message: Result<CommonMessages<'_>, Error>,
@@ -191,7 +214,10 @@ where
         }
     }
 
-    /// Called by `Self::handle_message_common` when a setup connection message is received from the downstream node.
+    /// Handles a `SetupConnection` message.
+    ///
+    /// This method processes a `SetupConnection` message and handles it
+    /// by delegating to the appropriate handler in the routing logic.
     fn handle_setup_connection(
         &mut self,
         m: SetupConnection,

@@ -1,26 +1,43 @@
-//! The parsers modules provides logic to convert raw SV2 message data into rust types
-//! as well as logic to handle conversions among SV2 rust types
+//! # Parsing, Serializing, and Message Type Identification
+//!
+//! Provides logic to convert raw Stratum V2 (Sv2) message data into Rust types, as well as logic
+//! to handle conversions among Sv2 rust types.
+//!
+//! Most of the logic on this module is tightly coupled with the [`binary_sv2`] crate.
+//!
+//! ## Responsibilities
+//! - **Parsing**: Converts raw Sv2 message bytes into Rust enums ([`CommonMessages`], [`Mining`],
+//!   etc.).
+//! - **Serialization**: Converts Rust enums back into binary format for transmission.
+//! - **Protocol Abstraction**: Separates logic for different Sv2 subprotocols, ensuring modular and
+//!   extensible design.
+//! - **Message Metadata**: Identifies message types and channel bits for routing and processing.
+//!
+//! ## Supported Subprotocols
+//! - **Common Messages**: Shared across all Sv2 roles.
+//! - **Template Distribution**: Handles block templates updates and transaction data.
+//! - **Job Declaration**: Manages custom mining job declarations, transactions, and solutions.
+//! - **Mining Protocol**: Manages standard mining communication (e.g., job dispatch, shares
+//!   submission).
 
 use crate::Error;
 
-#[cfg(not(feature = "with_serde"))]
-use binary_sv2::{decodable::DecodableField, decodable::FieldMarker, encodable::EncodableField};
-
-#[cfg(feature = "with_serde")]
-use binary_sv2::Serialize;
+use binary_sv2::{
+    decodable::{DecodableField, FieldMarker},
+    encodable::EncodableField,
+};
 
 use binary_sv2::GetSize;
 
 use binary_sv2::{from_bytes, Deserialize};
 
-use framing_sv2::framing2::{Frame, Sv2Frame};
+use framing_sv2::framing::Sv2Frame;
 
 use const_sv2::{
     CHANNEL_BIT_ALLOCATE_MINING_JOB_TOKEN, CHANNEL_BIT_ALLOCATE_MINING_JOB_TOKEN_SUCCESS,
     CHANNEL_BIT_CHANNEL_ENDPOINT_CHANGED, CHANNEL_BIT_CLOSE_CHANNEL,
     CHANNEL_BIT_COINBASE_OUTPUT_DATA_SIZE, CHANNEL_BIT_DECLARE_MINING_JOB,
     CHANNEL_BIT_DECLARE_MINING_JOB_ERROR, CHANNEL_BIT_DECLARE_MINING_JOB_SUCCESS,
-    CHANNEL_BIT_IDENTIFY_TRANSACTIONS, CHANNEL_BIT_IDENTIFY_TRANSACTIONS_SUCCESS,
     CHANNEL_BIT_MINING_SET_NEW_PREV_HASH, CHANNEL_BIT_NEW_EXTENDED_MINING_JOB,
     CHANNEL_BIT_NEW_MINING_JOB, CHANNEL_BIT_NEW_TEMPLATE, CHANNEL_BIT_OPEN_EXTENDED_MINING_CHANNEL,
     CHANNEL_BIT_OPEN_EXTENDED_MINING_CHANNEL_SUCCES, CHANNEL_BIT_OPEN_MINING_CHANNEL_ERROR,
@@ -40,7 +57,6 @@ use const_sv2::{
     MESSAGE_TYPE_CHANNEL_ENDPOINT_CHANGED, MESSAGE_TYPE_CLOSE_CHANNEL,
     MESSAGE_TYPE_COINBASE_OUTPUT_DATA_SIZE, MESSAGE_TYPE_DECLARE_MINING_JOB,
     MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR, MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS,
-    MESSAGE_TYPE_IDENTIFY_TRANSACTIONS, MESSAGE_TYPE_IDENTIFY_TRANSACTIONS_SUCCESS,
     MESSAGE_TYPE_MINING_SET_NEW_PREV_HASH, MESSAGE_TYPE_NEW_EXTENDED_MINING_JOB,
     MESSAGE_TYPE_NEW_MINING_JOB, MESSAGE_TYPE_NEW_TEMPLATE,
     MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL, MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCES,
@@ -70,8 +86,8 @@ use template_distribution_sv2::{
 
 use job_declaration_sv2::{
     AllocateMiningJobToken, AllocateMiningJobTokenSuccess, DeclareMiningJob, DeclareMiningJobError,
-    DeclareMiningJobSuccess, IdentifyTransactions, IdentifyTransactionsSuccess,
-    ProvideMissingTransactions, ProvideMissingTransactionsSuccess, SubmitSolutionJd,
+    DeclareMiningJobSuccess, ProvideMissingTransactions, ProvideMissingTransactionsSuccess,
+    SubmitSolutionJd,
 };
 
 use mining_sv2::{
@@ -86,107 +102,107 @@ use mining_sv2::{
 use core::convert::{TryFrom, TryInto};
 use tracing::error;
 
+// TODO: Fix this, PoolMessages shouldn't be a generic parser.
+/// An alias to a generic parser
 pub type AnyMessage<'a> = PoolMessages<'a>;
 
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "with_serde", derive(Serialize, Deserialize))]
+/// Common Sv2 protocol messages used across all subprotocols.
+///
+/// These messages are essential
+/// for initializing connections and managing endpoints.
+/// A parser of messages that are common to all Sv2 subprotocols, to be used for parsing raw
+/// messages
+#[derive(Clone, Debug, PartialEq)]
 pub enum CommonMessages<'a> {
+    /// Notifies about changes in channel endpoint configuration.
     ChannelEndpointChanged(ChannelEndpointChanged),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+
+    /// Initiates a connection between a client and server.
     SetupConnection(SetupConnection<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
+
+    /// Indicates an error during connection setup.
     SetupConnectionError(SetupConnectionError<'a>),
+
+    /// Acknowledges successful connection setup.
     SetupConnectionSuccess(SetupConnectionSuccess),
 }
 
+/// A parser of messages of Template Distribution subprotocol, to be used for parsing raw messages
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "with_serde", derive(Serialize, Deserialize))]
 pub enum TemplateDistribution<'a> {
     CoinbaseOutputDataSize(CoinbaseOutputDataSize),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     NewTemplate(NewTemplate<'a>),
     RequestTransactionData(RequestTransactionData),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     RequestTransactionDataError(RequestTransactionDataError<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     RequestTransactionDataSuccess(RequestTransactionDataSuccess<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SetNewPrevHash(SetNewPrevHash<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SubmitSolution(SubmitSolution<'a>),
 }
 
+/// A parser of messages of Job Declaration subprotocol, to be used for parsing raw messages
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "with_serde", derive(Serialize, Deserialize))]
 pub enum JobDeclaration<'a> {
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     AllocateMiningJobToken(AllocateMiningJobToken<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     AllocateMiningJobTokenSuccess(AllocateMiningJobTokenSuccess<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     DeclareMiningJob(DeclareMiningJob<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     DeclareMiningJobError(DeclareMiningJobError<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     DeclareMiningJobSuccess(DeclareMiningJobSuccess<'a>),
-    IdentifyTransactions(IdentifyTransactions),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
-    IdentifyTransactionsSuccess(IdentifyTransactionsSuccess<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     ProvideMissingTransactions(ProvideMissingTransactions<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     ProvideMissingTransactionsSuccess(ProvideMissingTransactionsSuccess<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SubmitSolution(SubmitSolutionJd<'a>),
 }
 
+/// Mining subprotocol messages: categorization, encapsulation, and parsing.
+///
+/// Encapsulates mining-related Sv2 protocol messages, providing both a structured representation
+/// of parsed messages and an abstraction for communication between mining-related roles. These
+/// messages are essential for managing mining channels, distributing jobs, and processing shares.
+///
+/// ## Purpose
+/// - **Parsing Raw Messages**:
+///   - Converts raw binary Sv2 mining subprotocol messages into strongly-typed Rust
+///     representations.
+///   - Simplifies deserialization by mapping raw data directly to the appropriate enum variant.
+///   - Once parsed, the [`Mining`] enum provides a structured interface that can be passed through
+///     routing and processing layers in roles like proxies or pools.
+/// - **Encapsulation**:
+///   - Groups mining-related messages into a unified type, abstracting away low-level subprotocol
+///     details and making it easier to interact with Sv2 protocol messages.
+/// - **Facilitating Modular Handling**:
+///   - Categorizes mining messages under a single enum, enabling roles (e.g., proxies or pools) to
+///     route and process messages more efficiently using pattern matching and centralized logic.
+/// - **Bridging Parsed Messages and Role Logic**:
+///   - Acts as a bridge between parsed subprotocol messages and role-specific logic, providing a
+///     unified interface for handling mining-related communication. This reduces complexity and
+///     ensures consistency across roles.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "with_serde", derive(Serialize, Deserialize))]
 pub enum Mining<'a> {
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     CloseChannel(CloseChannel<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     NewExtendedMiningJob(NewExtendedMiningJob<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     NewMiningJob(NewMiningJob<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     OpenExtendedMiningChannel(OpenExtendedMiningChannel<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     OpenExtendedMiningChannelSuccess(OpenExtendedMiningChannelSuccess<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     OpenMiningChannelError(OpenMiningChannelError<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     OpenStandardMiningChannel(OpenStandardMiningChannel<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     OpenStandardMiningChannelSuccess(OpenStandardMiningChannelSuccess<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     Reconnect(Reconnect<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SetCustomMiningJob(SetCustomMiningJob<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SetCustomMiningJobError(SetCustomMiningJobError<'a>),
     SetCustomMiningJobSuccess(SetCustomMiningJobSuccess),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SetExtranoncePrefix(SetExtranoncePrefix<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SetGroupChannel(SetGroupChannel<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SetNewPrevHash(MiningSetNewPrevHash<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SetTarget(SetTarget<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SubmitSharesError(SubmitSharesError<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     SubmitSharesExtended(SubmitSharesExtended<'a>),
     SubmitSharesStandard(SubmitSharesStandard),
     SubmitSharesSuccess(SubmitSharesSuccess),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     UpdateChannel(UpdateChannel<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     UpdateChannelError(UpdateChannelError<'a>),
 }
 
 impl<'a> Mining<'a> {
+    /// converter into static lifetime
     pub fn into_static(self) -> Mining<'static> {
         match self {
             Mining::CloseChannel(m) => Mining::CloseChannel(m.into_static()),
@@ -225,8 +241,12 @@ impl<'a> Mining<'a> {
     }
 }
 
+/// A trait that every Sv2 message parser must implement.
+/// It helps parsing from Rust types to raw messages.
 pub trait IsSv2Message {
+    /// get message type
     fn message_type(&self) -> u8;
+    /// get channel bit
     fn channel_bit(&self) -> bool;
 }
 
@@ -284,8 +304,6 @@ impl<'a> IsSv2Message for JobDeclaration<'a> {
             Self::DeclareMiningJob(_) => MESSAGE_TYPE_DECLARE_MINING_JOB,
             Self::DeclareMiningJobSuccess(_) => MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS,
             Self::DeclareMiningJobError(_) => MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR,
-            Self::IdentifyTransactions(_) => MESSAGE_TYPE_IDENTIFY_TRANSACTIONS,
-            Self::IdentifyTransactionsSuccess(_) => MESSAGE_TYPE_IDENTIFY_TRANSACTIONS_SUCCESS,
             Self::ProvideMissingTransactions(_) => MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
             Self::ProvideMissingTransactionsSuccess(_) => {
                 MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS
@@ -300,8 +318,6 @@ impl<'a> IsSv2Message for JobDeclaration<'a> {
             Self::DeclareMiningJob(_) => CHANNEL_BIT_DECLARE_MINING_JOB,
             Self::DeclareMiningJobSuccess(_) => CHANNEL_BIT_DECLARE_MINING_JOB_SUCCESS,
             Self::DeclareMiningJobError(_) => CHANNEL_BIT_DECLARE_MINING_JOB_ERROR,
-            Self::IdentifyTransactions(_) => CHANNEL_BIT_IDENTIFY_TRANSACTIONS,
-            Self::IdentifyTransactionsSuccess(_) => CHANNEL_BIT_IDENTIFY_TRANSACTIONS_SUCCESS,
             Self::ProvideMissingTransactions(_) => CHANNEL_BIT_PROVIDE_MISSING_TRANSACTIONS,
             Self::ProvideMissingTransactionsSuccess(_) => {
                 CHANNEL_BIT_PROVIDE_MISSING_TRANSACTIONS_SUCCESS
@@ -374,7 +390,6 @@ impl<'a> IsSv2Message for Mining<'a> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> From<CommonMessages<'decoder>> for EncodableField<'decoder> {
     fn from(m: CommonMessages<'decoder>) -> Self {
         match m {
@@ -385,7 +400,6 @@ impl<'decoder> From<CommonMessages<'decoder>> for EncodableField<'decoder> {
         }
     }
 }
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> From<TemplateDistribution<'decoder>> for EncodableField<'decoder> {
     fn from(m: TemplateDistribution<'decoder>) -> Self {
         match m {
@@ -399,7 +413,6 @@ impl<'decoder> From<TemplateDistribution<'decoder>> for EncodableField<'decoder>
         }
     }
 }
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> From<JobDeclaration<'decoder>> for EncodableField<'decoder> {
     fn from(m: JobDeclaration<'decoder>) -> Self {
         match m {
@@ -408,8 +421,6 @@ impl<'decoder> From<JobDeclaration<'decoder>> for EncodableField<'decoder> {
             JobDeclaration::DeclareMiningJob(a) => a.into(),
             JobDeclaration::DeclareMiningJobSuccess(a) => a.into(),
             JobDeclaration::DeclareMiningJobError(a) => a.into(),
-            JobDeclaration::IdentifyTransactions(a) => a.into(),
-            JobDeclaration::IdentifyTransactionsSuccess(a) => a.into(),
             JobDeclaration::ProvideMissingTransactions(a) => a.into(),
             JobDeclaration::ProvideMissingTransactionsSuccess(a) => a.into(),
             JobDeclaration::SubmitSolution(a) => a.into(),
@@ -417,7 +428,6 @@ impl<'decoder> From<JobDeclaration<'decoder>> for EncodableField<'decoder> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> From<Mining<'decoder>> for EncodableField<'decoder> {
     fn from(m: Mining<'decoder>) -> Self {
         match m {
@@ -478,8 +488,6 @@ impl<'a> GetSize for JobDeclaration<'a> {
             JobDeclaration::DeclareMiningJob(a) => a.get_size(),
             JobDeclaration::DeclareMiningJobSuccess(a) => a.get_size(),
             JobDeclaration::DeclareMiningJobError(a) => a.get_size(),
-            JobDeclaration::IdentifyTransactions(a) => a.get_size(),
-            JobDeclaration::IdentifyTransactionsSuccess(a) => a.get_size(),
             JobDeclaration::ProvideMissingTransactions(a) => a.get_size(),
             JobDeclaration::ProvideMissingTransactionsSuccess(a) => a.get_size(),
             JobDeclaration::SubmitSolution(a) => a.get_size(),
@@ -515,7 +523,6 @@ impl GetSize for Mining<'_> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> Deserialize<'decoder> for CommonMessages<'decoder> {
     fn get_structure(_v: &[u8]) -> std::result::Result<Vec<FieldMarker>, binary_sv2::Error> {
         unimplemented!()
@@ -526,7 +533,6 @@ impl<'decoder> Deserialize<'decoder> for CommonMessages<'decoder> {
         unimplemented!()
     }
 }
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> Deserialize<'decoder> for TemplateDistribution<'decoder> {
     fn get_structure(_v: &[u8]) -> std::result::Result<Vec<FieldMarker>, binary_sv2::Error> {
         unimplemented!()
@@ -537,7 +543,6 @@ impl<'decoder> Deserialize<'decoder> for TemplateDistribution<'decoder> {
         unimplemented!()
     }
 }
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> Deserialize<'decoder> for JobDeclaration<'decoder> {
     fn get_structure(_v: &[u8]) -> std::result::Result<Vec<FieldMarker>, binary_sv2::Error> {
         unimplemented!()
@@ -548,7 +553,6 @@ impl<'decoder> Deserialize<'decoder> for JobDeclaration<'decoder> {
         unimplemented!()
     }
 }
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> Deserialize<'decoder> for Mining<'decoder> {
     fn get_structure(_v: &[u8]) -> std::result::Result<Vec<FieldMarker>, binary_sv2::Error> {
         unimplemented!()
@@ -560,7 +564,6 @@ impl<'decoder> Deserialize<'decoder> for Mining<'decoder> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> Deserialize<'decoder> for PoolMessages<'decoder> {
     fn get_structure(_v: &[u8]) -> std::result::Result<Vec<FieldMarker>, binary_sv2::Error> {
         unimplemented!()
@@ -572,7 +575,6 @@ impl<'decoder> Deserialize<'decoder> for PoolMessages<'decoder> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> Deserialize<'decoder> for MiningDeviceMessages<'decoder> {
     fn get_structure(_v: &[u8]) -> std::result::Result<Vec<FieldMarker>, binary_sv2::Error> {
         unimplemented!()
@@ -584,6 +586,7 @@ impl<'decoder> Deserialize<'decoder> for MiningDeviceMessages<'decoder> {
     }
 }
 
+/// A list of 8-bit message type variants that are common to all Sv2 subprotocols
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 #[allow(clippy::enum_variant_names)]
@@ -634,6 +637,7 @@ impl<'a> TryFrom<(u8, &'a mut [u8])> for CommonMessages<'a> {
     }
 }
 
+/// A list of 8-bit message type variants under Template Distribution subprotocol
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 #[allow(clippy::enum_variant_names)]
@@ -710,6 +714,7 @@ impl<'a> TryFrom<(u8, &'a mut [u8])> for TemplateDistribution<'a> {
     }
 }
 
+/// A list of 8-bit message type variants under Job Declaration subprotocol
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 #[allow(clippy::enum_variant_names)]
@@ -719,8 +724,6 @@ pub enum JobDeclarationTypes {
     DeclareMiningJob = MESSAGE_TYPE_DECLARE_MINING_JOB,
     DeclareMiningJobSuccess = MESSAGE_TYPE_DECLARE_MINING_JOB_SUCCESS,
     DeclareMiningJobError = MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR,
-    IdentifyTransactions = MESSAGE_TYPE_IDENTIFY_TRANSACTIONS,
-    IdentifyTransactionsSuccess = MESSAGE_TYPE_IDENTIFY_TRANSACTIONS_SUCCESS,
     ProvideMissingTransactions = MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
     ProvideMissingTransactionsSuccess = MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
     SubmitSolution = MESSAGE_TYPE_SUBMIT_SOLUTION_JD,
@@ -742,10 +745,6 @@ impl TryFrom<u8> for JobDeclarationTypes {
                 Ok(JobDeclarationTypes::DeclareMiningJobSuccess)
             }
             MESSAGE_TYPE_DECLARE_MINING_JOB_ERROR => Ok(JobDeclarationTypes::DeclareMiningJobError),
-            MESSAGE_TYPE_IDENTIFY_TRANSACTIONS => Ok(JobDeclarationTypes::IdentifyTransactions),
-            MESSAGE_TYPE_IDENTIFY_TRANSACTIONS_SUCCESS => {
-                Ok(JobDeclarationTypes::IdentifyTransactionsSuccess)
-            }
             MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS => {
                 Ok(JobDeclarationTypes::ProvideMissingTransactions)
             }
@@ -784,14 +783,6 @@ impl<'a> TryFrom<(u8, &'a mut [u8])> for JobDeclaration<'a> {
                 let message: DeclareMiningJobError = from_bytes(v.1)?;
                 Ok(JobDeclaration::DeclareMiningJobError(message))
             }
-            JobDeclarationTypes::IdentifyTransactions => {
-                let message: IdentifyTransactions = from_bytes(v.1)?;
-                Ok(JobDeclaration::IdentifyTransactions(message))
-            }
-            JobDeclarationTypes::IdentifyTransactionsSuccess => {
-                let message: IdentifyTransactionsSuccess = from_bytes(v.1)?;
-                Ok(JobDeclaration::IdentifyTransactionsSuccess(message))
-            }
             JobDeclarationTypes::ProvideMissingTransactions => {
                 let message: ProvideMissingTransactions = from_bytes(v.1)?;
                 Ok(JobDeclaration::ProvideMissingTransactions(message))
@@ -808,6 +799,7 @@ impl<'a> TryFrom<(u8, &'a mut [u8])> for JobDeclaration<'a> {
     }
 }
 
+/// A list of 8-bit message type variants under Mining subprotocol
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 #[allow(clippy::enum_variant_names)]
@@ -976,15 +968,12 @@ impl<'a> TryFrom<(u8, &'a mut [u8])> for Mining<'a> {
     }
 }
 
+/// A parser of messages that a Mining Device could send
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "with_serde", derive(Serialize, Deserialize))]
 pub enum MiningDeviceMessages<'a> {
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     Common(CommonMessages<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     Mining(Mining<'a>),
 }
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> From<MiningDeviceMessages<'decoder>> for EncodableField<'decoder> {
     fn from(m: MiningDeviceMessages<'decoder>) -> Self {
         match m {
@@ -1017,16 +1006,13 @@ impl<'a> TryFrom<(u8, &'a mut [u8])> for MiningDeviceMessages<'a> {
     }
 }
 
+// todo: fix this, PoolMessages should only contain Mining and Common
+/// A parser of all messages a Pool could send
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "with_serde", derive(Serialize, Deserialize))]
 pub enum PoolMessages<'a> {
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     Common(CommonMessages<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     Mining(Mining<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     JobDeclaration(JobDeclaration<'a>),
-    #[cfg_attr(feature = "with_serde", serde(borrow))]
     TemplateDistribution(TemplateDistribution<'a>),
 }
 
@@ -1041,7 +1027,6 @@ impl<'a> TryFrom<MiningDeviceMessages<'a>> for PoolMessages<'a> {
     }
 }
 
-#[cfg(not(feature = "with_serde"))]
 impl<'decoder> From<PoolMessages<'decoder>> for EncodableField<'decoder> {
     fn from(m: PoolMessages<'decoder>) -> Self {
         match m {
@@ -1106,11 +1091,18 @@ impl<'a> TryFrom<(u8, &'a mut [u8])> for PoolMessages<'a> {
         let is_common: Result<CommonMessageTypes, Error> = v.0.try_into();
         let is_mining: Result<MiningTypes, Error> = v.0.try_into();
         let is_job_declaration: Result<JobDeclarationTypes, Error> = v.0.try_into();
-        match (is_common, is_mining, is_job_declaration) {
-            (Ok(_), Err(_), Err(_)) => Ok(Self::Common(v.try_into()?)),
-            (Err(_), Ok(_), Err(_)) => Ok(Self::Mining(v.try_into()?)),
-            (Err(_), Err(_), Ok(_)) => Ok(Self::JobDeclaration(v.try_into()?)),
-            (Err(e), Err(_), Err(_)) => Err(e),
+        let is_template_distribution: Result<TemplateDistributionTypes, Error> = v.0.try_into();
+        match (
+            is_common,
+            is_mining,
+            is_job_declaration,
+            is_template_distribution,
+        ) {
+            (Ok(_), Err(_), Err(_), Err(_)) => Ok(Self::Common(v.try_into()?)),
+            (Err(_), Ok(_), Err(_), Err(_)) => Ok(Self::Mining(v.try_into()?)),
+            (Err(_), Err(_), Ok(_), Err(_)) => Ok(Self::JobDeclaration(v.try_into()?)),
+            (Err(_), Err(_), Err(_), Ok(_)) => Ok(Self::TemplateDistribution(v.try_into()?)),
+            (Err(e), Err(_), Err(_), Err(_)) => Err(e),
             // This is an impossible state is safe to panic here
             _ => panic!(),
         }
@@ -1215,5 +1207,109 @@ impl<'a> TryFrom<PoolMessages<'a>> for MiningDeviceMessages<'a> {
             PoolMessages::JobDeclaration(_) => Err(Error::UnexpectedPoolMessage),
             PoolMessages::TemplateDistribution(_) => Err(Error::UnexpectedPoolMessage),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        mining_sv2::NewMiningJob,
+        parsers::{Mining, PoolMessages},
+    };
+    use binary_sv2::{Sv2Option, U256};
+    use codec_sv2::StandardSv2Frame;
+    use std::convert::{TryFrom, TryInto};
+
+    pub type Message = PoolMessages<'static>;
+    pub type StdFrame = StandardSv2Frame<Message>;
+
+    #[test]
+    fn new_mining_job_serialization() {
+        const CORRECTLY_SERIALIZED_MSG: &'static [u8] = &[
+            0, 128, 21, 49, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 1, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+            19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+            41, 42, 43, 44, 45, 46, 47, 48,
+        ];
+        let mining_message = PoolMessages::Mining(Mining::NewMiningJob(NewMiningJob {
+            channel_id: u32::from_le_bytes([1, 2, 3, 4]),
+            job_id: u32::from_le_bytes([5, 6, 7, 8]),
+            min_ntime: Sv2Option::new(Some(u32::from_le_bytes([9, 10, 11, 12]))),
+            version: u32::from_le_bytes([13, 14, 15, 16]),
+            merkle_root: U256::try_from((17_u8..(17 + 32)).collect::<Vec<u8>>()).unwrap(),
+        }));
+        message_serialization_check(mining_message, CORRECTLY_SERIALIZED_MSG);
+    }
+
+    fn message_serialization_check(message: PoolMessages<'static>, expected_result: &[u8]) {
+        let frame = StdFrame::try_from(message).unwrap();
+        let encoded_frame_length = frame.encoded_length();
+
+        let mut buffer = [0; 0xffff];
+        frame.serialize(&mut buffer).unwrap();
+        check_length_consistency(&buffer[..encoded_frame_length]);
+        check_length_consistency(&expected_result);
+        assert_eq!(
+            is_channel_msg(&buffer),
+            is_channel_msg(&expected_result),
+            "Unexpected channel_message flag",
+        );
+        assert_eq!(
+            extract_extension_type(&buffer),
+            extract_extension_type(&expected_result),
+            "Unexpected extension type",
+        );
+        assert_eq!(
+            extract_message_type(&buffer),
+            extract_message_type(&expected_result),
+            "Unexpected message type",
+        );
+        assert_eq!(
+            extract_payload_length(&buffer),
+            extract_payload_length(&expected_result),
+            "Unexpected message length",
+        );
+        assert_eq!(
+            encoded_frame_length as u32,
+            expected_result.len() as u32,
+            "Method encoded_length() returned different length than the actual message length",
+        );
+        assert_eq!(
+            extract_payload(&buffer[..encoded_frame_length]),
+            extract_payload(&expected_result),
+            "Unexpected payload",
+        )
+    }
+
+    fn is_channel_msg(serialized_frame: &[u8]) -> bool {
+        let array_repre = serialized_frame[..2].try_into().unwrap();
+        let decoded_extension_type = u16::from_le_bytes(array_repre);
+        (decoded_extension_type & (1 << 15)) != 0
+    }
+    fn extract_extension_type(serialized_frame: &[u8]) -> u16 {
+        let array_repre = serialized_frame[..2].try_into().unwrap();
+        let decoded_extension_type = u16::from_le_bytes(array_repre);
+        decoded_extension_type & (u16::MAX >> 1)
+    }
+    fn extract_message_type(serialized_frame: &[u8]) -> u8 {
+        serialized_frame[2]
+    }
+    fn extract_payload_length(serialized_frame: &[u8]) -> u32 {
+        let mut array_repre = [0; 4];
+        array_repre[..3].copy_from_slice(&serialized_frame[3..6]);
+        u32::from_le_bytes(array_repre)
+    }
+    fn extract_payload(serialized_frame: &[u8]) -> &[u8] {
+        assert!(serialized_frame.len() > 6);
+        &serialized_frame[6..]
+    }
+
+    fn check_length_consistency(serialized_frame: &[u8]) {
+        let message_length = extract_payload_length(serialized_frame) as usize;
+        let payload_length = extract_payload(serialized_frame).len();
+        assert_eq!(
+            message_length, payload_length,
+            "Header declared length [{} bytes] differs from the actual payload length [{} bytes]",
+            message_length, payload_length,
+        );
     }
 }

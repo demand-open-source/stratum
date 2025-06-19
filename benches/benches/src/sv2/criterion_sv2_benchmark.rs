@@ -1,4 +1,4 @@
-use codec_sv2::{Frame, StandardEitherFrame, StandardSv2Frame};
+use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
 use criterion::{black_box, Criterion};
 use roles_logic_sv2::{
     handlers::{common::ParseUpstreamCommonMessages, mining::ParseUpstreamMiningMessages},
@@ -197,7 +197,7 @@ fn client_sv2_handle_message_common(c: &mut Criterion) {
 
 fn main() {
     let mut criterion = Criterion::default()
-        .sample_size(50)
+        .sample_size(100)
         .measurement_time(std::time::Duration::from_secs(5));
     client_sv2_setup_connection(&mut criterion);
     client_sv2_setup_connection_serialize(&mut criterion);

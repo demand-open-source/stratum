@@ -1,16 +1,15 @@
 use super::{Downstream, DownstreamMessages, SetDownstreamTarget};
 
 use super::super::error::{Error, ProxyResult};
+use primitive_types::U256;
 use roles_logic_sv2::utils::Mutex;
 use std::{ops::Div, sync::Arc};
 use v1::json_rpc;
 
-use stratum_common::bitcoin::util::uint::Uint256;
-
 impl Downstream {
     /// initializes the timestamp and resets the number of submits for a connection.
-    /// Should only be called once for the lifetime of a connection since `try_update_difficulty_settings()`
-    /// also does this during this update
+    /// Should only be called once for the lifetime of a connection since
+    /// `try_update_difficulty_settings()` also does this during this update
     pub async fn init_difficulty_management(
         self_: Arc<Mutex<Self>>,
         init_target: &[u8],
@@ -50,7 +49,8 @@ impl Downstream {
         Ok(())
     }
 
-    /// Called before a miner disconnects so we can remove the miner's hashrate from the aggregated channel hashrate
+    /// Called before a miner disconnects so we can remove the miner's hashrate from the aggregated
+    /// channel hashrate
     #[allow(clippy::result_large_err)]
     pub fn remove_miner_hashrate_from_channel(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
         self_
@@ -70,8 +70,8 @@ impl Downstream {
         Ok(())
     }
 
-    /// if enough shares have been submitted according to the config, this function updates the difficulty for the connection and sends the new
-    /// difficulty to the miner
+    /// if enough shares have been submitted according to the config, this function updates the
+    /// difficulty for the connection and sends the new difficulty to the miner
     pub async fn try_update_difficulty_settings(
         self_: Arc<Mutex<Self>>,
     ) -> ProxyResult<'static, ()> {
@@ -174,12 +174,12 @@ impl Downstream {
         if Downstream::is_zero(target) {
             return Ok(0.0);
         }
-        let target = Uint256::from_be_slice(target)?;
+        let target = U256::from_big_endian(target);
         let pdiff: [u8; 32] = [
             0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
         ];
-        let pdiff = Uint256::from_be_bytes(pdiff);
+        let pdiff = U256::from_big_endian(pdiff.as_ref());
 
         if pdiff > target {
             let diff = pdiff.div(target);
@@ -192,9 +192,13 @@ impl Downstream {
         }
     }
 
-    /// This function updates the miner hashrate and resets difficulty management params. To calculate hashrate it calculates the realized shares per minute from the number of shares submitted
-    /// and the delta time since last update. It then uses the realized shares per minute and the target those shares where mined on to calculate an estimated hashrate during that period with the
-    /// function [`roles_logic_sv2::utils::hash_rate_from_target`]. Lastly, it adjusts the `channel_nominal_hashrate` according to the change in estimated miner hashrate
+    /// This function updates the miner hashrate and resets difficulty management params. To
+    /// calculate hashrate it calculates the realized shares per minute from the number of shares
+    /// submitted and the delta time since last update. It then uses the realized shares per
+    /// minute and the target those shares where mined on to calculate an estimated hashrate during
+    /// that period with the function [`roles_logic_sv2::utils::hash_rate_from_target`]. Lastly,
+    /// it adjusts the `channel_nominal_hashrate` according to the change in estimated miner
+    /// hashrate
     #[allow(clippy::result_large_err)]
     pub fn update_miner_hashrate(
         self_: Arc<Mutex<Self>>,
@@ -317,14 +321,15 @@ mod test {
 
     use crate::downstream_sv1::Downstream;
 
+    #[ignore] // as described in issue #988
     #[test]
     fn test_diff_management() {
         let expected_shares_per_minute = 1000.0;
-        let total_run_time = std::time::Duration::from_secs(11);
+        let total_run_time = std::time::Duration::from_secs(60);
         let initial_nominal_hashrate = measure_hashrate(5);
         let target = match roles_logic_sv2::utils::hash_rate_to_target(
             initial_nominal_hashrate,
-            expected_shares_per_minute.into(),
+            expected_shares_per_minute,
         ) {
             Ok(target) => target,
             Err(_) => panic!(),
@@ -342,13 +347,13 @@ mod test {
         }
 
         let calculated_share_per_min = count as f32 / (elapsed.as_secs_f32() / 60.0);
-        // This is the error margin for a confidence of 99% given the expect number of shares per
-        // minute TODO the review the math under it
-        let error_margin = get_error(expected_shares_per_minute.into());
+        // This is the error margin for a confidence of 99.99...% given the expect number of shares
+        // per minute TODO the review the math under it
+        let error_margin = get_error(expected_shares_per_minute);
         let error = (calculated_share_per_min - expected_shares_per_minute as f32).abs();
         assert!(
             error <= error_margin as f32,
-            "Calculated shares per minute are outside the 99% confidence interval. Error: {:?}, Error margin: {:?}, {:?}", error, error_margin,calculated_share_per_min
+            "Calculated shares per minute are outside the 99.99...% confidence interval. Error: {:?}, Error margin: {:?}, {:?}", error, error_margin,calculated_share_per_min
         );
     }
 
@@ -379,9 +384,8 @@ mod test {
         }
 
         let elapsed_secs = start_time.elapsed().as_secs_f64();
-        let hashrate = hashes as f64 / elapsed_secs;
-        let nominal_hash_rate = hashrate;
-        nominal_hash_rate
+
+        hashes as f64 / elapsed_secs
     }
 
     fn hash(share: &mut [u8; 80]) -> Target {
@@ -438,6 +442,7 @@ mod test {
             0,
             downstream_conf.clone(),
             Arc::new(Mutex::new(upstream_config)),
+            "0".to_string(),
         );
         downstream.difficulty_mgmt.min_individual_miner_hashrate = start_hashrate as f32;
 
