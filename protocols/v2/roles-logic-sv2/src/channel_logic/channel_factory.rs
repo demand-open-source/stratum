@@ -1009,7 +1009,7 @@ impl ChannelFactory {
                 print_hash.to_vec().as_hex()
             );
 
-            let coinbase = [coinbase_tx_prefix, &extranonce[..], coinbase_tx_suffix]
+            let coinbase = [coinbase_tx_prefix, additional_coinbase_script_data.unwrap_or(&[]),&extranonce[..], coinbase_tx_suffix]
                 .concat()
                 .to_vec();
             match self.kind {
@@ -2110,6 +2110,14 @@ impl ProxyExtendedChannelFactory {
             .get_last_valid_job()
             .as_ref()
             .map(|j| j.0.version)
+    }
+
+    
+    /// Return a mining job by its `job_id`.
+    /// This can be `None` if we try to fetch a stale job because we clean up the valid jobs array
+    /// upon receiving a new `PrevHash`
+    pub fn job(&self, job_id: u32) -> Option<&(NewExtendedMiningJob<'static>, Vec<u32>)> {
+        self.inner.get_valid_job(job_id)
     }
 
     /// Returns the full extranonce, extranonce1 (static for channel) + extranonce2 (miner nonce
