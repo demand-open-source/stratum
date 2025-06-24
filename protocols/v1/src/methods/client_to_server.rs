@@ -1,4 +1,5 @@
 use bitcoin_hashes::hex::ToHex;
+use core::fmt;
 use serde_json::{
     Value,
     Value::{Array as JArrary, Null, Number as JNumber, String as JString},
@@ -319,7 +320,7 @@ fn submit_from_to_json_rpc(submit: Submit<'static>) -> bool {
 /// (allowing a resumed connection) even if the subscription id is changed!
 ///
 /// [a]: crate::methods::server_to_client::Notify
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Subscribe<'a> {
     pub id: u64,
     pub agent_signature: String,
@@ -359,6 +360,22 @@ impl<'a> TryFrom<Subscribe<'a>> for Message {
             method: "mining.subscribe".into(),
             params: (&params[..]).into(),
         }))
+    }
+}
+
+impl<'a> fmt::Debug for Subscribe<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Subscribe")
+            .field("id", &self.id)
+            .field("agent_signature", &self.agent_signature)
+            .field(
+                "extranonce1",
+                &match &self.extranonce1 {
+                    Some(extranonce) => extranonce.0.inner_as_ref().to_hex(),
+                    None => "None".to_string(),
+                },
+            )
+            .finish()
     }
 }
 

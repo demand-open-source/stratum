@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use binary_sv2::{binary_codec_sv2, Deserialize, Serialize, Str0255, B032};
-use core::convert::TryInto;
+use core::{convert::TryInto, fmt};
 
 /// Message used by downstream to send result of its hashing work to an upstream.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -32,7 +32,7 @@ pub struct SubmitSharesStandard {
 /// [`SubmitSharesExtended::extranonce`].
 ///
 /// Only relevant for Extended Channels.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SubmitSharesExtended<'decoder> {
     /// Channel identification.
     pub channel_id: u32,
@@ -60,6 +60,20 @@ pub struct SubmitSharesExtended<'decoder> {
     /// The size of the provided extranonce must be equal to the negotiated extranonce size from
     /// channel opening flow.
     pub extranonce: B032<'decoder>,
+}
+
+impl<'decoder> fmt::Debug for SubmitSharesExtended<'decoder> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SubmitSharesExtended")
+            .field("channel_id", &self.channel_id)
+            .field("sequence_number", &self.sequence_number)
+            .field("job_id", &self.job_id)
+            .field("nonce", &self.nonce)
+            .field("ntime", &self.ntime)
+            .field("version", &self.version)
+            .field("extranonce_prefix", &self.extranonce.to_hex())
+            .finish()
+    }
 }
 
 /// Message used by upstream to accept [`SubmitSharesStandard`] or [`SubmitSharesExtended`].

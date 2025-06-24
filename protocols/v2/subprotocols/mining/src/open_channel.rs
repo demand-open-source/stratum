@@ -1,4 +1,4 @@
-use alloc::{string::ToString, vec::Vec};
+use alloc::{fmt, string::ToString, vec::Vec};
 use binary_sv2::{binary_codec_sv2, Deserialize, Serialize, Str0255, U32AsRef, B032, U256};
 use core::convert::TryInto;
 /// Message used by a downstream to request opening a Standard Channel.
@@ -135,7 +135,7 @@ impl<'decoder> OpenExtendedMiningChannel<'decoder> {
 }
 
 /// Message used by upstream to accept [`OpenExtendedMiningChannel` request from downstream.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct OpenExtendedMiningChannelSuccess<'decoder> {
     /// Used for matching requests/responses.
     ///
@@ -152,6 +152,18 @@ pub struct OpenExtendedMiningChannelSuccess<'decoder> {
     pub extranonce_size: u16,
     /// Bytes used as implicit first part of extranonce
     pub extranonce_prefix: B032<'decoder>,
+}
+
+impl<'decoder> fmt::Debug for OpenExtendedMiningChannelSuccess<'decoder> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenExtendedMiningChannelSuccess")
+            .field("request_id", &self.request_id)
+            .field("channel_id", &self.channel_id)
+            .field("target", &self.target.to_hex())
+            .field("extranonce_size", &self.extranonce_size)
+            .field("extranonce_prefix", &self.extranonce_prefix.to_hex())
+            .finish()
+    }
 }
 
 /// Message used by upstream to reject [`OpenExtendedMiningChannel`] or

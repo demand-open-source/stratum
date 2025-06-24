@@ -1,6 +1,6 @@
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use binary_sv2::{binary_codec_sv2, Deserialize, Seq0255, Serialize, Sv2Option, B064K, U256};
-use core::convert::TryInto;
+use core::{convert::TryInto, fmt};
 
 /// Message used by an upstream to provide an updated mining job to downstream.
 ///
@@ -64,7 +64,7 @@ impl<'d> NewMiningJob<'d> {
 /// An Extended Job allows rolling Merkle Roots, giving extensive control over the search space so
 /// that they can implement various advanced use cases such as: translation between Stratum V1 and
 /// V2 protocols, difficulty aggregation and search space splitting.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct NewExtendedMiningJob<'decoder> {
     /// Identifier of the Extended Mining Channel that this job is valid for.
     ///
@@ -120,6 +120,36 @@ impl<'d> NewExtendedMiningJob<'d> {
     }
     pub fn set_no_future(&mut self, min_ntime: u32) {
         self.min_ntime = Sv2Option::new(Some(min_ntime));
+    }
+}
+
+impl<'decoder> fmt::Debug for NewExtendedMiningJob<'decoder> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewExtendedMiningJob")
+            .field("channel_id", &self.channel_id)
+            .field("job_id", &self.job_id)
+            .field(
+                "min_ntime",
+                &format_args!("{:?}", &self.min_ntime.clone().into_inner()),
+            )
+            .field("version", &self.version)
+            .field("version_rolling_allowed", &self.version_rolling_allowed)
+            .field(
+                "merkle_path",
+                &format_args!(
+                    "[{} hashes: {}]",
+                    self.merkle_path.0.len(),
+                    self.merkle_path
+                        .0
+                        .iter()
+                        .map(|hash| hash.to_hex())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .field("coinbase_tx_prefix", &self.coinbase_tx_prefix.to_hex())
+            .field("coinbase_tx_suffix", &self.coinbase_tx_suffix.to_hex())
+            .finish()
     }
 }
 

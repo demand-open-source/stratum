@@ -948,11 +948,11 @@ impl ChannelFactory {
         };
         trace!(
             "On checking target coinbase prefix is: {:?}",
-            coinbase_tx_prefix
+            coinbase_tx_prefix.to_hex_string(hex::Case::Lower)
         );
         trace!(
             "On checking target coinbase suffix is: {:?}",
-            coinbase_tx_suffix
+            coinbase_tx_suffix.to_hex_string(hex::Case::Lower)
         );
         // Safe unwrap a sha256 can always be converted into [u8;32]
         let merkle_root: [u8; 32] = crate::utils::merkle_root_from_path(
@@ -1009,9 +1009,14 @@ impl ChannelFactory {
                 print_hash.to_vec().as_hex()
             );
 
-            let coinbase = [coinbase_tx_prefix, additional_coinbase_script_data.unwrap_or(&[]),&extranonce[..], coinbase_tx_suffix]
-                .concat()
-                .to_vec();
+            let coinbase = [
+                coinbase_tx_prefix,
+                additional_coinbase_script_data.unwrap_or(&[]),
+                &extranonce[..],
+                coinbase_tx_suffix,
+            ]
+            .concat()
+            .to_vec();
             match self.kind {
                 ExtendedChannelKind::Proxy { .. } | ExtendedChannelKind::ProxyJd { .. } => {
                     let upstream_extranonce_space = self.extranonces.get_range0_len();
@@ -1336,10 +1341,9 @@ impl PoolChannelFactory {
         &mut self,
         m: SubmitSharesStandard,
     ) -> Result<OnNewShare, Error> {
-        let additional_coinbase_script_data =
-            self.get_additional_coinbase_script_data(m.channel_id, m.job_id).ok_or(
-                Error::ShareDoNotMatchAnyJob
-            )?;
+        let additional_coinbase_script_data = self
+            .get_additional_coinbase_script_data(m.channel_id, m.job_id)
+            .ok_or(Error::ShareDoNotMatchAnyJob)?;
         match self.inner.channel_to_group_id.get(&m.channel_id) {
             Some(g_id) => {
                 let referenced_job = self
@@ -1400,10 +1404,9 @@ impl PoolChannelFactory {
         m: SubmitSharesExtended,
     ) -> Result<OnNewShare, Error> {
         let target = self.job_creator.last_target();
-        let additional_coinbase_script_data =
-            self.get_additional_coinbase_script_data(m.channel_id, m.job_id).ok_or(
-                Error::ShareDoNotMatchAnyJob
-            )?;
+        let additional_coinbase_script_data = self
+            .get_additional_coinbase_script_data(m.channel_id, m.job_id)
+            .ok_or(Error::ShareDoNotMatchAnyJob)?;
         // When downstream set a custom mining job we add the job to the negotiated job
         // hashmap, with the extended channel id as a key. Whenever the pool receive a share must
         // first check if the channel have a negotiated job if so we can not retrieve the template
@@ -1586,7 +1589,11 @@ impl PoolChannelFactory {
 
     // TODO ret can not be larger then 32 bytes maybe use the stack for it?
     #[inline(always)]
-    pub fn get_additional_coinbase_script_data(&self, channel_id: u32, job_id: u32) -> Option<Vec<u8>> {
+    pub fn get_additional_coinbase_script_data(
+        &self,
+        channel_id: u32,
+        job_id: u32,
+    ) -> Option<Vec<u8>> {
         debug_assert!({
             let have_old = self.job_ids_using_old_add_data.contains(&job_id);
             let not_have_old = self
@@ -1613,7 +1620,7 @@ impl PoolChannelFactory {
                     Some(add_data.clone())
                 }
             }
-            None => None
+            None => None,
         }
     }
 
@@ -1678,10 +1685,7 @@ impl PoolChannelFactory {
     }
 
     pub fn get_extranonce_prefix(&self, channel_id: u32) -> Option<Vec<u8>> {
-        let channel = self
-            .inner
-            .extended_channels
-            .get(&channel_id)?;
+        let channel = self.inner.extended_channels.get(&channel_id)?;
         Some(channel.extranonce_prefix.to_vec())
     }
 }
@@ -2112,7 +2116,6 @@ impl ProxyExtendedChannelFactory {
             .map(|j| j.0.version)
     }
 
-    
     /// Return a mining job by its `job_id`.
     /// This can be `None` if we try to fetch a stale job because we clean up the valid jobs array
     /// upon receiving a new `PrevHash`

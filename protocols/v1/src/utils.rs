@@ -19,6 +19,9 @@ impl<'a> Extranonce<'a> {
     pub fn is_empty(&self) -> bool {
         self.0.inner_as_ref().is_empty()
     }
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0.inner_as_ref())
+    }
 }
 
 impl<'a> TryFrom<Vec<u8>> for Extranonce<'a> {
@@ -243,6 +246,9 @@ pub struct MerkleNode<'a>(pub U256<'a>);
 impl<'a> MerkleNode<'a> {
     pub fn is_empty(&self) -> bool {
         self.0.inner_as_ref().is_empty()
+    }
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0.inner_as_ref())
     }
 }
 
