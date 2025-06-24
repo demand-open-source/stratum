@@ -8,6 +8,4 @@ members = [
     "bip32-key-derivation",
 ]
 
-exclude = [
-    "message-generator",
-]
+exclude = [ ]
