@@ -1,3 +1,4 @@
+use core::fmt;
 use serde_json::{
     Value,
     Value::{Array as JArrary, Bool as JBool, Number as JNumber, String as JString},
@@ -35,7 +36,7 @@ use crate::{
 /// * Clean Jobs: If true, miners should abort their current work and immediately use the new job.
 ///   If false, they can still use the current job, but should move to the new one after exhausting
 ///   the current nonce range.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Notify<'a> {
     pub job_id: String,
     pub prev_hash: PrevHash<'a>,
@@ -46,6 +47,34 @@ pub struct Notify<'a> {
     pub bits: HexU32Be,
     pub time: HexU32Be,
     pub clean_jobs: bool,
+}
+
+impl<'a> fmt::Debug for Notify<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Notify")
+            .field("job_id", &self.job_id)
+            .field("prev_hash", &self.prev_hash.0.to_hex_reversed())
+            .field("coin_base1", &String::from(self.coin_base1.clone()))
+            .field("coin_base2", &String::from(self.coin_base2.clone()))
+            .field(
+                "merkle_branch",
+                &format_args!(
+                    "[{} hashes :{}]",
+                    self.merkle_branch.len(),
+                    &self
+                        .merkle_branch
+                        .iter()
+                        .map(|merkle_node| { String::from(merkle_node.clone()) })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            )
+            .field("version", &self.version.0)
+            .field("bits", &self.bits.0)
+            .field("time", &self.time.0)
+            .field("clean_jobs", &self.clean_jobs)
+            .finish()
+    }
 }
 
 impl<'a> From<Notify<'a>> for Message {

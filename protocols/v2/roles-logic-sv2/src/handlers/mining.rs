@@ -432,7 +432,7 @@ pub trait ParseUpstreamMiningMessages<
             }
             Ok(Mining::OpenExtendedMiningChannelSuccess(m)) => {
                 info!("Received OpenExtendedMiningChannelSuccess with request id: {} and channel id: {}", m.request_id, m.channel_id);
-                debug!("OpenStandardMiningChannelSuccess: {:?}", m);
+                debug!("OpenExtendedMiningChannelSuccess: {:?}", m);
                 match channel_type {
                     SupportedChannelTypes::Standard => Err(Error::UnexpectedMessage(
                         MESSAGE_TYPE_OPEN_EXTENDED_MINING_CHANNEL_SUCCES,
