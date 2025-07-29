@@ -86,7 +86,10 @@ pub trait IsServer<'a> {
         Self: std::marker::Sized,
     {
         match request {
-            methods::Client2Server::SuggestDifficulty(_) => Ok(None),
+            methods::Client2Server::SuggestDifficulty(suggest_difficulty) => {
+                self.handle_suggest_difficulty(&suggest_difficulty);
+                Ok(None)
+            }
             methods::Client2Server::Authorize(authorize) => {
                 let authorized = self.handle_authorize(&authorize);
                 if authorized {
@@ -175,7 +178,7 @@ pub trait IsServer<'a> {
     /// https://bitcoin.stackexchange.com/questions/29416/how-do-pool-servers-handle-multiple-workers-sharing-one-connection-with-stratum
     fn handle_authorize(&self, request: &client_to_server::Authorize) -> bool;
 
-    fn handle_suggest_difficulty(&self, request: &client_to_server::SuggestDifficulty);
+    fn handle_suggest_difficulty(&mut self, request: &client_to_server::SuggestDifficulty);
 
     /// When miner find the job which meets requested difficulty, it can submit share to the server.
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
