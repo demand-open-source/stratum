@@ -87,10 +87,12 @@ pub trait IsServer<'a> {
     {
         match request {
             methods::Client2Server::SuggestDifficulty(suggest_difficulty) => {
+                debug!("Received suggest_difficulty: {:?}", suggest_difficulty);
                 self.handle_suggest_difficulty(&suggest_difficulty);
                 Ok(None)
             }
             methods::Client2Server::Authorize(authorize) => {
+                debug!("Received authorize: {:?}", authorize);
                 let authorized = self.handle_authorize(&authorize);
                 if authorized {
                     self.authorize(&authorize.name);
@@ -98,7 +100,7 @@ pub trait IsServer<'a> {
                 Ok(Some(authorize.respond(authorized)))
             }
             methods::Client2Server::Configure(configure) => {
-                debug!("{:?}", configure);
+                debug!("Received configure: {:?}", configure);
                 self.set_version_rolling_mask(configure.version_rolling_mask());
                 self.set_version_rolling_min_bit(configure.version_rolling_min_bit_count());
                 let (version_rolling, min_diff) = self.handle_configure(&configure);
@@ -109,32 +111,46 @@ pub trait IsServer<'a> {
                 Ok(None)
             }
             methods::Client2Server::Submit(submit) => {
+                debug!("Received submit: {:?}", submit);
                 let has_valid_version_bits = match &submit.version_bits {
                     Some(a) => {
+                        debug!("Checking version bits: {:x?}", a);
                         if let Some(version_rolling_mask) = self.version_rolling_mask() {
+                            debug!("Using version rolling mask: {:x?}", version_rolling_mask);
                             version_rolling_mask.check_mask(a)
                         } else {
+                            debug!("No version rolling mask set");
                             false
                         }
                     }
                     None => self.version_rolling_mask().is_none(),
                 };
+                debug!("Version bits valid: {}", has_valid_version_bits);
 
-                let is_valid_submission = self.is_authorized(&submit.user_name)
+                let is_authorized = self.is_authorized(&submit.user_name);
+                debug!("Is authorized: {}", &is_authorized);
+                let is_valid_submission = is_authorized
                     && self.extranonce2_size() == submit.extra_nonce2.len()
                     && has_valid_version_bits;
+                debug!("Is valid submission: {}", is_valid_submission);
 
                 if is_valid_submission {
                     let accepted = self.handle_submit(&submit);
+                    debug!("Submission accepted: {}", accepted);
                     Ok(Some(submit.respond(accepted)))
                 } else {
+                    debug!("Invalid submission from user: {}", submit.user_name);
                     Err(Error::InvalidSubmission)
                 }
             }
             methods::Client2Server::Subscribe(subscribe) => {
+                debug!("Received subscribe: {:?}", subscribe);
                 let subscriptions = self.handle_subscribe(&subscribe);
+                debug!("Subscriptions: {:?}", subscriptions);
                 let extra_n1 = self.set_extranonce1(None);
+                debug!("Extranonce1: {:?}", extra_n1);
                 let extra_n2_size = self.set_extranonce2_size(None);
+                debug!("Extranonce2 size: {:?}", extra_n2_size);
                 Ok(Some(subscribe.respond(
                     subscriptions,
                     extra_n1,
